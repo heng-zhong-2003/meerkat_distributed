@@ -79,13 +79,12 @@ pub fn apply_batch(
     batch: HashSet<_PropaChange>,
     // worker: &Worker,
     value: &mut Option<Val>,
-    applied_txns: &mut Vec<Txn>,
+    pred_txns: &mut Vec<Txn>,
     prev_batch_provides: &mut HashSet<Txn>,
     propa_changes_to_apply: &mut HashMap<TxnAndName, _PropaChange>,
     replica: &mut HashMap<String, Option<Val>>,
-) -> (HashSet<Txn>, HashSet<Txn>, Option<Val>) {
+) -> (HashSet<Txn>, Option<Val>) {
     let mut all_provides: HashSet<Txn> = HashSet::new();
-    let mut all_requires: HashSet<Txn> = prev_batch_provides.clone();
 
     // latest change to prevent applying older updates after younger ones
     // from the same dependency (only apply one dependency's latest update
@@ -94,12 +93,8 @@ pub fn apply_batch(
 
     for change in batch.iter() {
         // change := (value, P, R)
-        let change_txns_toapply = &change.propa_change.provides;
+        let change_txns_toapply = &change.propa_change.preds;
         all_provides = all_provides.union(change_txns_toapply).cloned().collect();
-        all_requires = all_requires
-            .union(&change.propa_change.requires)
-            .cloned()
-            .collect();
 
         for txn in change_txns_toapply.iter() {
             propa_changes_to_apply.remove(&TxnAndName {
@@ -134,13 +129,13 @@ pub fn apply_batch(
         value
     );
     for txn in all_provides.iter() {
-        applied_txns.push(txn.clone());
+        pred_txns.push(txn.clone());
     }
 
     // update prev batch's applied txns, i.e. to be all_provides
     *prev_batch_provides = all_provides.clone();
 
-    return (all_provides, all_requires, value.clone());
+    return (all_provides, value.clone());
 
     // // broadcast the update to subscribers
     // let msg_propa = Message::PropaMessage { propa_change:

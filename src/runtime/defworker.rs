@@ -106,7 +106,7 @@ pub struct DefWorker {
     pub senders_to_subscribers: HashMap<String, Sender<Message>>,
 
     pub value: Option<Val>,
-    pub applied_txns: Vec<Txn>,
+    pub pred_txns: Vec<Txn>,
     pub prev_batch_provides: HashSet<Txn>,
     // data structure maintaining all propa_changes to be apply
     pub propa_changes_to_apply: HashMap<TxnAndName, _PropaChange>,
@@ -121,8 +121,8 @@ pub struct DefWorker {
     // var ->->-> input(def)
     // input(def) -> var
     /*
-       a   b    c 
-        \  |   /
+       a   b   c 
+        \  |  /
            d 
         a -> [] // or reflexively contain a ? 
         b -> [] // or reflexively contain b ? 
@@ -147,7 +147,7 @@ impl DefWorker {
             senders_to_subscribers: HashMap::new(),
 
             value: None,
-            applied_txns: Vec::new(),
+            pred_txns: Vec::new(),
             prev_batch_provides: HashSet::new(),
             propa_changes_to_apply: HashMap::new(),
 
@@ -166,23 +166,21 @@ impl DefWorker {
     pub async fn handle_message(&mut self, msg: &Message) {
         match msg {
             Message::UsrReadDefRequest { txn, requires } => {
-                let result_provide = self.applied_txns.clone().into_iter().collect();
-                // TODO: set smaller than applied_txns should also work ...
-                let msg_back = Message::UsrReadDefResult {
+                let result_pred = self.pred_txns.clone().into_iter().collect();
+                let msg_back = Message::UsrReadDefResult { // TODO(Opt): set smaller than applied_txns should also work ...
                     txn: txn.clone(), 
                     name: self.name.clone(),
                     result: self.value.clone(),   
-                    result_provide, 
+                    result_pred, // send back pred_txn (applied txns) to manager
                 };
                 let _ = self.sender_to_manager.send(msg_back).await;
-                // TODO: think about requires (may be unnecessary)
             }
             Message::Propagate { propa_change } => {
                 println!("{color_blue}PropaMessage{color_reset}");
                 let _propa_change =
                     Self::processed_propachange(&mut self.counter, propa_change, &mut self.transtitive_deps);
 
-                for txn in &propa_change.provides {
+                for txn in &propa_change.preds {
                     println!("{color_blue}insert propa_changes_to_apply{color_reset}");
                     self.propa_changes_to_apply.insert(
                         TxnAndName {
@@ -219,16 +217,16 @@ impl DefWorker {
             // search for valid batch
             let valid_batch = search_batch(
                 &def_worker.propa_changes_to_apply,
-                &def_worker.applied_txns,
+                &def_worker.pred_txns,
             );
 
             // apply valid batch
             println!("{color_yellow}apply batch called{color_reset}");
-            let (all_provides, all_requires, new_value) = apply_batch(
+            let (all_provides, new_value) = apply_batch(
                 valid_batch,
                 // &def_worker.worker,
                 &mut def_worker.value,
-                &mut def_worker.applied_txns,
+                &mut def_worker.pred_txns,
                 &mut def_worker.prev_batch_provides,
                 &mut def_worker.propa_changes_to_apply,
                 &mut def_worker.replica,
@@ -300,7 +298,7 @@ impl DefWorker {
         println!("def should have inputs: {:?}", transtitive_deps);
         let mut deps: HashSet<TxnAndName> = HashSet::new();
 
-        for txn in propa_change.provides.iter() {
+        for txn in propa_change.preds.iter() {
             for write in txn.writes.iter() {
                 let var_name = write.name.clone();
                 println!("def name: {:?}", var_name);
@@ -328,29 +326,30 @@ impl DefWorker {
         }
 
         // Not fully sure about below:
-        for txn in propa_change.requires.iter() {
-            for write in txn.writes.iter() {
-                let var_name = write.name.clone();
+        
+        // for txn in propa_change.requires.iter() {
+        //     for write in txn.writes.iter() {
+        //         let var_name = write.name.clone();
 
-                let mut inputs: Vec<String> = Vec::new();
-                for (i, dep_vars) in transtitive_deps.iter() {
-                    match dep_vars.get(&var_name) {
-                        Some(_) => {
-                            inputs.push(i.clone());
-                        }
-                        None => {}
-                    }
-                }
+        //         let mut inputs: Vec<String> = Vec::new();
+        //         for (i, dep_vars) in transtitive_deps.iter() {
+        //             match dep_vars.get(&var_name) {
+        //                 Some(_) => {
+        //                     inputs.push(i.clone());
+        //                 }
+        //                 None => {}
+        //             }
+        //         }
 
-                for i_name in inputs.iter() {
-                    let txn_name = TxnAndName {
-                        txn: txn.clone(),
-                        name: i_name.clone(),
-                    };
-                    deps.insert(txn_name);
-                }
-            }
-        }
+        //         for i_name in inputs.iter() {
+        //             let txn_name = TxnAndName {
+        //                 txn: txn.clone(),
+        //                 name: i_name.clone(),
+        //             };
+        //             deps.insert(txn_name);
+        //         }
+        //     }
+        // }
 
         _PropaChange {
             propa_id: Self::next_count(counter_ref),

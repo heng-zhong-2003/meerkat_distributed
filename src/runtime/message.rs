@@ -23,7 +23,7 @@ pub enum Message {
     UsrReadVarResult {
         var_name: String,
         result: Option<Val>,
-        result_provides: HashSet<Txn>,
+        result_preds: HashSet<Txn>,
         txn: Txn,
     },
     UsrWriteVarRequest {
@@ -39,7 +39,7 @@ pub enum Message {
         txn: Txn,
         name: String,
         result: Option<Val>,
-        result_provide: HashSet<Txn>,
+        result_pred: HashSet<Txn>,
     },
 
     DevReadRequest {
@@ -101,8 +101,8 @@ pub enum Message {
 pub struct PropaChange {
     pub from_name: String,
     pub new_val: Val,
-    pub provides: HashSet<Txn>,
-    pub requires: HashSet<Txn>,
+    pub preds: HashSet<Txn>,
+    // pub requires: HashSet<Txn>,
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]

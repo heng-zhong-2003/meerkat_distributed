@@ -26,10 +26,11 @@ pub struct VarWorker {
     // Can abstract all four into Worker, see hig-demo repo
 
     pub value: Option<Val>,
-    pub latest_write_txn: Option<Txn>,
+
     pub locks: HashSet<Lock>,
     pub lock_queue: HashSet<Lock>,
     pub pending_writes: HashSet<PendingWrite>,
+
     // supplement page 2 top:
     // R is required to be applied before P:
     // For state var f:
@@ -39,7 +40,9 @@ pub struct VarWorker {
     //      be the set of variables (state vars?) read by t
     // R = latest_write_txn + what is computed by manager
     // so is `pred_txns` redundant?
-    pub pred_txns: HashSet<Txn>, // nextChangeRequires in the go hig impl
+    pub latest_write_txn: Option<Txn>,
+    pub pred_txns: HashSet<Txn>,    // applied transactions
+    pub next_pred_set: HashSet<Txn> // pred set send to subscribers
 }
 
 impl VarWorker {
@@ -54,11 +57,12 @@ impl VarWorker {
             sender_to_manager,
             senders_to_subscribers: HashMap::new(),
             value: None,
-            latest_write_txn: None,
             locks: HashSet::new(),
             lock_queue: HashSet::new(),
             pending_writes: HashSet::new(),
+            latest_write_txn: None,
             pred_txns: HashSet::new(),
+            next_pred_set: HashSet::new(),
         }
     }
 
@@ -108,39 +112,6 @@ impl VarWorker {
                     self.locks.remove(tbr);
                 }
             }
-            Message::UsrReadVarRequest { txn } => {
-                let mut self_r_locks_held_by_txn: HashSet<Lock> = HashSet::new();
-                // let mut self_w_locks_held_by_txn: HashSet<Lock> = HashSet::new();
-                for rl in self.locks.iter() {
-                    if rl.lock_kind == LockKind::Read {
-                        if txn.id == rl.txn.id {
-                            self_r_locks_held_by_txn.insert(rl.clone());
-                        }
-                    }
-                }
-                // I do not think this really resolves the action sequence problem.
-                // self.pred_txns.insert(txn.clone());
-                let _ = self
-                    .sender_to_manager
-                    .send(Message::UsrReadVarResult {
-                        var_name: self.name.clone(),
-                        result: self.value.clone(),
-                        result_provides: if self.latest_write_txn == None {
-                            HashSet::new()
-                        } else {
-                            let mut rslt = HashSet::new();
-                            rslt.insert(self.latest_write_txn.clone().unwrap());
-                            rslt
-                        },
-                        txn: txn,
-                    })
-                    .await;
-                for rl in self_r_locks_held_by_txn.into_iter() {
-                    self.locks.remove(&rl);
-                    // next change requires??
-                    // todo!()
-                }
-            }
             Message::Subscribe {
                 subscriber_name,
                 sender_to_subscriber,
@@ -162,6 +133,33 @@ impl VarWorker {
                     },
                 };
                 let _ = sender_to_subscriber.send(respond_msg).await.unwrap();
+            }
+            Message::UsrReadVarRequest { txn } => {
+                let mut self_r_locks_held_by_txn: HashSet<Lock> = HashSet::new();
+                for rl in self.locks.iter() {
+                    if rl.lock_kind == LockKind::Read {
+                        if txn.id == rl.txn.id {
+                            self_r_locks_held_by_txn.insert(rl.clone());
+                        }
+                    }
+                }
+                // now txn's read has been applied
+                self.pred_txns.insert(txn.clone());
+
+                let _ = self
+                    .sender_to_manager
+                    .send(Message::UsrReadVarResult {
+                        var_name: self.name.clone(),
+                        result: self.value.clone(),
+                        result_preds: self.pred_txns.clone(),
+                        txn: txn,
+                    })
+                    .await;
+                for rl in self_r_locks_held_by_txn.into_iter() {
+                    self.locks.remove(&rl);
+                    // next change requires??
+                    // todo!()
+                }
             }
             Message::UsrWriteVarRequest {
                 txn,
@@ -188,8 +186,7 @@ impl VarWorker {
                 // );
                 if !w_lock_granted {
                     panic!("attempt to write when no write lock");
-                }
-                if w_lock_granted {
+                } else {
                     self.locks.remove(&w_lock_for_txn);
                     self.pending_writes.insert(PendingWrite {
                         w_lock: Lock {
@@ -198,9 +195,7 @@ impl VarWorker {
                         },
                         value: write_val,
                     });
-                    for req_txn in requires.iter() {
-                        self.pred_txns.insert(req_txn.clone());
-                    }
+                    self.next_pred_set.extend(requires.iter().cloned());
                 }
             }
             #[allow(unreachable_patterns)]
@@ -221,28 +216,26 @@ impl VarWorker {
         }
         if !has_granted_write_lock && !self.pending_writes.is_empty() && self.locks.is_empty() {
             let pending_w = self.pending_writes.iter().next().unwrap().clone();
-            let mut propa_pvds = HashSet::new();
-            propa_pvds.insert(Txn {
+            self.next_pred_set.insert(Txn {
                 id: pending_w.w_lock.txn.id.clone(),
                 writes: pending_w.w_lock.txn.writes.clone(),
             });
-            let propa_reqs = self.pred_txns.clone();
+            self.next_pred_set.extend(self.pred_txns.iter().cloned());
+
             self.value = Some(pending_w.value.clone());
             for (_, sndr) in self.senders_to_subscribers.iter() {
                 let _ = sndr
                     .send(Message::Propagate { propa_change: PropaChange {
                         from_name: self.name.clone(),
                         new_val: pending_w.value.clone(),
-                        provides: propa_pvds.clone(),
-                        requires: propa_reqs.clone(),
+                        preds: self.next_pred_set.clone(),
                         }
                     })
                     .await
                     .unwrap();
             }
             self.latest_write_txn = Some(pending_w.w_lock.txn.clone());
-            self.pred_txns.clear();
-            self.pred_txns.insert(pending_w.w_lock.txn.clone());
+            self.next_pred_set.clear();
             self.locks.clear();
             has_granted_write_lock = false;
         }
@@ -348,7 +341,7 @@ async fn write_then_read() {
             Message::UsrReadVarResult {
                 var_name,
                 result,
-                result_provides,
+                result_preds,
                 txn,
             } => {
                 println!(
@@ -356,7 +349,7 @@ async fn write_then_read() {
 var_name={:?}, result={:?}, result_provides={:?}{color_reset}",
                     var_name,
                     result,
-                    result_provides
+                    result_preds
                         .iter()
                         .cloned()
                         .map(|x| x.id)
