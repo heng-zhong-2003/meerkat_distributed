@@ -1,6 +1,7 @@
 use crate::{
     frontend::typecheck::Type,
     runtime::{
+        lock::LockKind,
         message::{Message, Val},
         transaction::{Txn, TxnId},
     },
@@ -31,15 +32,23 @@ impl Manager {
         todo!()
     }
 
-    pub async fn instr_open_txn(&mut self) -> TxnId {
-        TxnId::new()
-    }
-
-    pub async fn instr_read(&mut self, worker_name: String, txn_id: TxnId) -> Val {
+    pub async fn instr_open_txn(&mut self, reads: HashSet<String>, writes: HashSet<String>) -> Txn {
         todo!()
     }
 
-    pub async fn instr_write(&mut self, worker_name: String, new_val: Val, txn_id: TxnId) {
+    pub async fn instr_read(&mut self, worker_name: String, txn: Txn) -> Val {
+        todo!()
+    }
+
+    async fn read_var(&mut self, worker_name: String, txn: &Txn) -> Val {
+        let req_r_lock_msg = Message::VarLockRequest {
+            lock_kind: LockKind::Read,
+            txn: txn.clone(),
+        };
+        todo!()
+    }
+
+    pub async fn instr_write(&mut self, worker_name: String, new_val: Val, txn: Txn) {
         todo!()
     }
 
