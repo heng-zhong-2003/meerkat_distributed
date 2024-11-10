@@ -1,11 +1,13 @@
-use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
 use crate::{
     frontend::meerast::Expr,
     runtime::{lock::LockKind, transaction::Txn},
 };
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 
 use tokio::sync::mpsc::Sender;
+
+pub const BUFFER_SIZE: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Val {
@@ -43,9 +45,10 @@ pub enum Message {
     },
 
     DevReadRequest {
-        txn: Txn, 
+        txn: Txn,
     },
-    DevReadResult { // grant access to Delta(name)
+    DevReadResult {
+        // grant access to Delta(name)
         name: String,
         txn: Txn,
     },
