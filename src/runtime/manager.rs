@@ -33,6 +33,7 @@ pub struct Manager {
     pub senders_to_workers: HashMap<String, Sender<Message>>,
     pub typing_env: HashMap<String, Type>,
     pub worker_kind_env: HashMap<String, WorkerKind>,
+    // { txn_id |-> { locks } }. What locks have this txn gotten
     pub txn_locks_map: HashMap<TxnId, HashSet<LockWorkerInfo>>,
     // [name |-> subscribers]
     pub dependency_graph: HashMap<String, HashSet<String>>,
