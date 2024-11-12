@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::runtime::{
-        message::{Val, TxnAndName, _PropaChange},
-        transaction::Txn,
-        def_eval::compute_val,
-    };
+    eval_expr::compute_val,
+    message::{TxnAndName, Val, _PropaChange},
+    transaction::Txn,
+};
 
 use inline_colorization::*;
 
@@ -63,8 +63,7 @@ pub fn search_batch(
         ) {
             println!("find a batch: {:#?}", batch_acc);
             return batch_acc;
-        } 
-        else {
+        } else {
             visited = HashSet::new();
             batch_acc = HashSet::new();
         }
@@ -72,7 +71,6 @@ pub fn search_batch(
 
     println!("cannot find a batch: {:#?}", batch_acc);
     batch_acc
-    
 }
 
 pub fn apply_batch(
