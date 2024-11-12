@@ -67,6 +67,7 @@ pub enum Message {
     },
     VarLockGranted {
         txn: Txn,
+        from_name: String,
     },
     VarLockAbort {
         txn: Txn,

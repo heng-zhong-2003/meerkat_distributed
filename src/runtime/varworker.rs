@@ -4,7 +4,7 @@ use crate::{
     frontend::meerast::Expr,
     runtime::{
         lock::{Lock, LockKind},
-        message::{Message, Val, PropaChange},
+        message::{Message, PropaChange, Val},
         transaction::{Txn, TxnId, WriteToName},
     },
 };
@@ -24,7 +24,6 @@ pub struct VarWorker {
     pub sender_to_manager: Sender<Message>,
     pub senders_to_subscribers: HashMap<String, Sender<Message>>,
     // Can abstract all four into Worker, see hig-demo repo
-
     pub value: Option<Val>,
 
     pub locks: HashSet<Lock>,
@@ -41,8 +40,8 @@ pub struct VarWorker {
     // R = latest_write_txn + what is computed by manager
     // so is `pred_txns` redundant?
     pub latest_write_txn: Option<Txn>,
-    pub pred_txns: HashSet<Txn>,    // applied transactions
-    pub next_pred_set: HashSet<Txn> // pred set send to subscribers
+    pub pred_txns: HashSet<Txn>,     // applied transactions
+    pub next_pred_set: HashSet<Txn>, // pred set send to subscribers
 }
 
 impl VarWorker {
@@ -225,11 +224,12 @@ impl VarWorker {
             self.value = Some(pending_w.value.clone());
             for (_, sndr) in self.senders_to_subscribers.iter() {
                 let _ = sndr
-                    .send(Message::Propagate { propa_change: PropaChange {
-                        from_name: self.name.clone(),
-                        new_val: pending_w.value.clone(),
-                        preds: self.next_pred_set.clone(),
-                        }
+                    .send(Message::Propagate {
+                        propa_change: PropaChange {
+                            from_name: self.name.clone(),
+                            new_val: pending_w.value.clone(),
+                            preds: self.next_pred_set.clone(),
+                        },
                     })
                     .await
                     .unwrap();
@@ -262,6 +262,7 @@ impl VarWorker {
                     .sender_to_manager
                     .send(Message::VarLockGranted {
                         txn: max_queued_lock.txn.clone(),
+                        from_name: self.name.clone(),
                     })
                     .await
                     .unwrap();
@@ -299,7 +300,7 @@ async fn write_then_read() {
     let _ = sndr_to_worker.send(w_lock_msg).await.unwrap();
     if let Some(msg) = rcvr_from_worker.recv().await {
         match msg {
-            Message::VarLockGranted { txn } => {
+            Message::VarLockGranted { txn, from_name: _ } => {
                 println!(
                     "{color_green}var write lock granted for txn {:?}{color_reset}",
                     txn.id
@@ -326,7 +327,7 @@ async fn write_then_read() {
     let _ = sndr_to_worker.send(r_lock_msg.clone()).await.unwrap();
     if let Some(msg) = rcvr_from_worker.recv().await {
         match msg {
-            Message::VarLockGranted { txn } => {
+            Message::VarLockGranted { txn, from_name: _ } => {
                 println!("var read lock granted {:?}", txn);
             }
             _ => panic!(),
