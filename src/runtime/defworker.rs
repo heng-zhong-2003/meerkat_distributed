@@ -82,7 +82,7 @@ dev2 update {
 // process Write Message from developer
 // process write lock
 
-use std::collections::{HashMap, HashSet};
+use std::{collections::{HashMap, HashSet}, hash::Hash};
 
 use crate::{
     frontend::meerast::Expr,
@@ -97,6 +97,8 @@ use crate::{
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use inline_colorization::*;
+
+use super::varworker::PendingWrite;
 
 
 pub struct DefWorker {
@@ -129,6 +131,10 @@ pub struct DefWorker {
         c -> [] // or reflexively contain c ?
      */
     pub counter: i32,
+
+    pub locks: HashSet<Lock>,
+    pub lock_queue: HashSet<Lock>,
+    pub pending_writes: HashSet<PendingWrite>,
 }
 
 impl DefWorker {
@@ -155,6 +161,10 @@ impl DefWorker {
             replica,
             transtitive_deps,
             counter: 0,
+
+            locks: HashSet::new(),
+            lock_queue: HashSet::new(),
+            pending_writes: HashSet::new(),
         }
     }
 
@@ -163,8 +173,78 @@ impl DefWorker {
         *counter_ref
     }
 
-    pub async fn handle_message(&mut self, msg: &Message) {
+    pub fn has_write_lock(&self) -> bool {
+        for lk in self.locks.iter() {
+            if lk.lock_kind == LockKind::Write {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub async fn handle_message(&mut self, msg: Message) {
         match msg {
+            Message::DefLockRequest { lock_kind, txn } => {
+                let mut oldest_txn_id = txn.id.clone();
+                for lock in self.locks.iter() {
+                    if lock.txn.id <= oldest_txn_id {
+                        oldest_txn_id = lock.txn.id.clone();
+                    }
+                }
+                if txn.id == oldest_txn_id 
+                    || (!self.has_write_lock() && self.pending_writes.is_empty())
+                {
+                    self.lock_queue.insert(Lock {
+                        lock_kind: lock_kind,
+                        txn: txn,
+                    });
+                } else {
+                    let _ = self
+                        .sender_to_manager
+                        .send(Message::DefLockAbort { txn: txn })
+                        .await
+                        .unwrap();
+                }
+            }
+            Message::DevReadDefRequest { txn } => {
+                let mut WLock: Option<Lock> = None;
+                for lock in self.locks.iter() {
+                    if lock.lock_kind == LockKind::Read && txn.id == lock.txn.id {
+                        WLock = Some(lock.clone());
+                        break;
+                    }
+                }
+                match WLock {
+                    // todo!("should we do");
+                    //     // self.pred_txns.push(txn.clone());
+                    Some(l) => {
+                        let _ = self
+                        .sender_to_manager
+                        .send(Message::DevReadDefResult {
+                            name: self.name.clone(),
+                            txn: txn,
+                        })
+                        .await;
+                        self.locks.remove(&l);
+                    },
+                    None => panic!(),
+                }
+            }
+            Message::DevWriteRequest { txn, write_expr } => {
+                todo!()
+            }
+            
+            Message::DefLockRelease { txn } => {
+                let to_be_removed: HashSet<Lock> = self
+                    .locks
+                    .iter()
+                    .cloned()
+                    .filter(|t| t.txn.id == txn.id)
+                    .collect();
+                for tbr in to_be_removed.iter() {
+                    self.locks.remove(tbr);
+                }
+            }
             Message::UsrReadDefRequest { txn, requires } => {
                 let result_pred = self.pred_txns.clone().into_iter().collect();
                 let msg_back = Message::UsrReadDefResult { // TODO(Opt): set smaller than applied_txns should also work ...
@@ -178,7 +258,7 @@ impl DefWorker {
             Message::Propagate { propa_change } => {
                 println!("{color_blue}PropaMessage{color_reset}");
                 let _propa_change =
-                    Self::processed_propachange(&mut self.counter, propa_change, &mut self.transtitive_deps);
+                    Self::processed_propachange(&mut self.counter, &propa_change, &mut self.transtitive_deps);
 
                 for txn in &propa_change.preds {
                     println!("{color_blue}insert propa_changes_to_apply{color_reset}");
@@ -210,7 +290,7 @@ impl DefWorker {
             println!("{color_red}defworker receive msg {:?}{color_reset}", msg);
             let _ = DefWorker::handle_message(
                 &mut def_worker,
-                &msg,
+                msg,
             )
             .await;
 
@@ -261,34 +341,6 @@ impl DefWorker {
         }
     }
 
-    // valid batch definition w.r.t. def d
-    // if (f := new value, P, R) in Batch, then
-    // for all (t, writes) in P of the propa_change message, we have
-    // (1)
-    // - (idea) current worker def d will apply all effects of transaction t
-    //   if a change message c requires a t, it means that before we can apply c,
-    //   we have to wait for change messages from all of our inputs that
-    //   (transitively) depend on the variables that t writes to.
-    // - (mathematically)
-    //   for all i in inputs(d),
-    //      if there exists a write to transitive_dependency(i) in writes,
-    //      then we want to see a propa change (i := _, P', R') in Batch
-    //         s.t. (t, writes) in P'
-    // - (implement) dependency graph
-    //   - map[{t, name}] -> _PropaChange message (dependent on a bunch of {t, name})
-    //   - for all (t, writes) in provides
-    //          for var in writes
-    //              for name in (inputs(d) effected by var)
-    //                  change.deps.insert({t, name})
-    // (2)
-    // - (idea/math) for all (t', write') <= (t, write), either t' has been
-    // applied or t' in change in this Batch
-    // - (implement)
-    //   - for all (t', writes') in requires
-    //      // then assuming (t', writes') in batch or applied implies:
-    //          for var in writes
-    //              for name in (inputs(d) effected by var)
-    //                  change.deps.insert({t, name})
     pub fn processed_propachange(
         counter_ref: &mut i32,
         propa_change: &PropaChange,
@@ -326,7 +378,7 @@ impl DefWorker {
         }
 
         // Not fully sure about below:
-        
+
         // for txn in propa_change.requires.iter() {
         //     for write in txn.writes.iter() {
         //         let var_name = write.name.clone();
