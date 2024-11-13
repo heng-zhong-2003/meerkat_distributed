@@ -3,7 +3,7 @@ use crate::{
     runtime::{
         lock::{Lock, LockKind},
         message::{self, Message, Val},
-        transaction::{Txn, TxnId},
+        transaction::{Txn, TxnId, WriteToName},
     },
 };
 
@@ -56,11 +56,45 @@ impl Manager {
         }
     }
 
-    pub fn handle_transaction(&mut self, txn: &Txn) {
+    pub async fn handle_transaction(&mut self, txn: &Txn) {
         let mut names_read_by_txn = HashSet::new();
+        let mut names_written_by_txn = HashSet::new();
         for w2n in txn.writes.iter() {
             let ex = w2n.expr.clone();
             names_read_by_txn.extend(ex.names_contained().into_iter());
+            names_written_by_txn.insert(w2n.name.clone());
+        }
+        loop {
+            let mut temp_val_env: HashMap<String, Val> = HashMap::new();
+            let mut read_abort = false;
+            let mut write_abort = false;
+            for nm in names_read_by_txn.iter() {
+                let var_or_def = self.worker_kind_env.get(nm).unwrap();
+                if *var_or_def == WorkerKind::Var {
+                    let opt_val = self.read_single_var(nm, txn).await;
+                    if opt_val == None {
+                        read_abort = true;
+                        break;
+                    } else {
+                        let val_of_nm = opt_val.unwrap();
+                        temp_val_env.insert(nm.clone(), val_of_nm);
+                    }
+                } else {
+                    todo!()
+                }
+            }
+            if read_abort {
+                for nm in names_read_by_txn.iter() {
+                    let sender_to_this_nm = self.senders_to_workers.get(nm).unwrap().clone();
+                    let _ = sender_to_this_nm
+                        .send(Message::VarLockAbort { txn: txn.clone() })
+                        .await
+                        .unwrap();
+                }
+            }
+            for w2n in txn.writes.iter() {
+                todo!()
+            }
         }
     }
 
@@ -198,6 +232,16 @@ require read locks, but really?{color_reset}"
             }
         }
         panic!("should not come to here!")
+    }
+
+    // return true if write successful, return false if write lock abort occurs
+    async fn write_single_var(
+        &mut self,
+        write_to_var: &WriteToName,
+        val_env: &HashMap<String, Val>,
+        txn: &Txn,
+    ) -> bool {
+        todo!()
     }
 
     // Do we really need the instruction `close(txn_id)`?
