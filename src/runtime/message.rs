@@ -44,16 +44,19 @@ pub enum Message {
         result_pred: HashSet<Txn>,
     },
 
-    DevReadRequest {
+    DevReadVarRequest {
         txn: Txn,
     },
-    DevReadResult {
+    DevReadDefRequest {
+        txn: Txn,
+    },
+    DevReadDefResult {
         // grant access to Delta(name)
         name: String,
         txn: Txn,
     },
 
-    DevWriteDefRequest {
+    DevWriteRequest {
         txn: Txn,
         write_expr: Expr,
     },

@@ -1,3 +1,31 @@
+    // valid batch definition w.r.t. def d
+    // if (f := new value, P, R) in Batch, then
+    // for all (t, writes) in P of the propa_change message, we have
+    // (1)
+    // - (idea) current worker def d will apply all effects of transaction t
+    //   if a change message c requires a t, it means that before we can apply c,
+    //   we have to wait for change messages from all of our inputs that
+    //   (transitively) depend on the variables that t writes to.
+    // - (mathematically)
+    //   for all i in inputs(d),
+    //      if there exists a write to transitive_dependency(i) in writes,
+    //      then we want to see a propa change (i := _, P', R') in Batch
+    //         s.t. (t, writes) in P'
+    // - (implement) dependency graph
+    //   - map[{t, name}] -> _PropaChange message (dependent on a bunch of {t, name})
+    //   - for all (t, writes) in provides
+    //          for var in writes
+    //              for name in (inputs(d) effected by var)
+    //                  change.deps.insert({t, name})
+    // (2)
+    // - (idea/math) for all (t', write') <= (t, write), either t' has been
+    // applied or t' in change in this Batch
+    // - (implement)
+    //   - for all (t', writes') in requires
+    //      // then assuming (t', writes') in batch or applied implies:
+    //          for var in writes
+    //              for name in (inputs(d) effected by var)
+    //                  change.deps.insert({t, name})
 use std::collections::{HashMap, HashSet};
 
 use crate::runtime::{
