@@ -1,5 +1,5 @@
-// defworker 
-// read lock 
+// defworker
+// read lock
 
 // append following to existing meerkat project:
 /*
@@ -12,22 +12,22 @@
 Service Manager:
 - create all worker a, b, f OR require RLocks for {a, b} and WLock for {f}
 - for code update, processing line l+1 will be blocked by line l (dependency)
-- for newly created 
+- for newly created
 - gather all typing inforation permitted by RLock, info directly from typing env
-  maintained by service manager 
-- defworker process Write: 
+  maintained by service manager
+- defworker process Write:
     - establish all dependencies (graph's structure) by subscribption,
     - gain all dependencies' values (current inputs)
 */
 
 // One problem:
 // for a defwork, code update vs pending change message (v, P, R), which apply first
-// - idea 1 : ignore all pending change messages 
+// - idea 1 : ignore all pending change messages
 // - idea 2 : wait for all pending change messages to finish
 /*
 update {
     var c = 1;
-    def f' = a * b * c; // if read(f') >= read(f), then batch validity remains 
+    def f' = a * b * c; // if read(f') >= read(f), then batch validity remains
     def g = f;
 }
 */
@@ -40,27 +40,24 @@ update {
 }
 */
 
-
-
 /*
 update {
     var c = 1;
-    def f' = a * b * c;  
+    def f' = a * b * c;
     def g = f;
 }
  |concurrently|
 update {
     var c = 1;
-    def f' = a;         
-    def g = f;          
+    def f' = a;
+    def g = f;
 }
 */
-// one WLock rejected 
-
+// one WLock rejected
 
 /*
 var c = 1;
-def f1 = a; 
+def f1 = a;
 def f2 = b;
 def g = f1 + f2;
 
@@ -69,28 +66,29 @@ dev1 update {
 }
  |concurrently|
 dev2 update {
-    def f1 = a + c; 
+    def f1 = a + c;
 }
 */
 // dev1:: WLock: {f1}; RLock: {b, c, g}
 // dev2:: WLock: {f2}; RLock: {a, c, g}
-
-
 
 // grant write lock to developer
 
 // process Write Message from developer
 // process write lock
 
-use std::{collections::{HashMap, HashSet}, hash::Hash};
+use std::{
+    collections::{HashMap, HashSet},
+    hash::Hash,
+};
 
 use crate::{
     frontend::meerast::Expr,
     runtime::{
-        lock::{Lock, LockKind},
-        message::{Message, Val, PropaChange, TxnAndName, _PropaChange},
-        transaction::{Txn, TxnId, WriteToName},
         def_batch_utils::{apply_batch, search_batch},
+        lock::{Lock, LockKind},
+        message::{Message, PropaChange, TxnAndName, Val, _PropaChange},
+        transaction::{Txn, TxnId, WriteToName},
     },
 };
 
@@ -99,7 +97,6 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use inline_colorization::*;
 
 use super::varworker::PendingWrite;
-
 
 pub struct DefWorker {
     pub name: String,
@@ -123,13 +120,13 @@ pub struct DefWorker {
     // var ->->-> input(def)
     // input(def) -> var
     /*
-       a   b   c 
-        \  |  /
-           d 
-        a -> [] // or reflexively contain a ? 
-        b -> [] // or reflexively contain b ? 
-        c -> [] // or reflexively contain c ?
-     */
+      a   b   c
+       \  |  /
+          d
+       a -> [] // or reflexively contain a ?
+       b -> [] // or reflexively contain b ?
+       c -> [] // or reflexively contain c ?
+    */
     pub counter: i32,
 
     pub locks: HashSet<Lock>,
@@ -147,8 +144,8 @@ impl DefWorker {
         transtitive_deps: HashMap<String, HashSet<String>>,
     ) -> DefWorker {
         DefWorker {
-            name: name.to_string(), 
-            receiver_from_manager, 
+            name: name.to_string(),
+            receiver_from_manager,
             sender_to_manager,
             senders_to_subscribers: HashMap::new(),
 
@@ -191,7 +188,7 @@ impl DefWorker {
                         oldest_txn_id = lock.txn.id.clone();
                     }
                 }
-                if txn.id == oldest_txn_id 
+                if txn.id == oldest_txn_id
                     || (!self.has_write_lock() && self.pending_writes.is_empty())
                 {
                     self.lock_queue.insert(Lock {
@@ -219,21 +216,21 @@ impl DefWorker {
                     //     // self.pred_txns.push(txn.clone());
                     Some(l) => {
                         let _ = self
-                        .sender_to_manager
-                        .send(Message::DevReadDefResult {
-                            name: self.name.clone(),
-                            txn: txn,
-                        })
-                        .await;
+                            .sender_to_manager
+                            .send(Message::DevReadDefResult {
+                                name: self.name.clone(),
+                                txn: txn,
+                            })
+                            .await;
                         self.locks.remove(&l);
-                    },
+                    }
                     None => panic!(),
                 }
             }
             Message::DevWriteRequest { txn, write_expr } => {
                 todo!()
             }
-            
+
             Message::DefLockRelease { txn } => {
                 let to_be_removed: HashSet<Lock> = self
                     .locks
@@ -247,18 +244,22 @@ impl DefWorker {
             }
             Message::UsrReadDefRequest { txn, requires } => {
                 let result_pred = self.pred_txns.clone().into_iter().collect();
-                let msg_back = Message::UsrReadDefResult { // TODO(Opt): set smaller than applied_txns should also work ...
-                    txn: txn.clone(), 
+                let msg_back = Message::UsrReadDefResult {
+                    // TODO(Opt): set smaller than applied_txns should also work ...
+                    txn: txn.clone(),
                     name: self.name.clone(),
-                    result: self.value.clone(),   
+                    result: self.value.clone(),
                     result_pred, // send back pred_txn (applied txns) to manager
                 };
                 let _ = self.sender_to_manager.send(msg_back).await;
             }
             Message::Propagate { propa_change } => {
                 println!("{color_blue}PropaMessage{color_reset}");
-                let _propa_change =
-                    Self::processed_propachange(&mut self.counter, &propa_change, &mut self.transtitive_deps);
+                let _propa_change = Self::processed_propachange(
+                    &mut self.counter,
+                    &propa_change,
+                    &mut self.transtitive_deps,
+                );
 
                 for txn in &propa_change.preds {
                     println!("{color_blue}insert propa_changes_to_apply{color_reset}");
@@ -270,7 +271,10 @@ impl DefWorker {
                         _propa_change.clone(),
                     );
                 }
-                println!("after receiving propamsg, the graph is {:#?}", &self.propa_changes_to_apply);
+                println!(
+                    "after receiving propamsg, the graph is {:#?}",
+                    &self.propa_changes_to_apply
+                );
             }
 
             // for test only
@@ -288,17 +292,11 @@ impl DefWorker {
     pub async fn run_defworker(mut def_worker: DefWorker) {
         while let Some(msg) = def_worker.receiver_from_manager.recv().await {
             println!("{color_red}defworker receive msg {:?}{color_reset}", msg);
-            let _ = DefWorker::handle_message(
-                &mut def_worker,
-                msg,
-            )
-            .await;
+            let _ = DefWorker::handle_message(&mut def_worker, msg).await;
 
             // search for valid batch
-            let valid_batch = search_batch(
-                &def_worker.propa_changes_to_apply,
-                &def_worker.pred_txns,
-            );
+            let valid_batch =
+                search_batch(&def_worker.propa_changes_to_apply, &def_worker.pred_txns);
 
             // apply valid batch
             println!("{color_yellow}apply batch called{color_reset}");
