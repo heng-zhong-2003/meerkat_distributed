@@ -65,63 +65,139 @@ impl Manager {
     }
 
     // locks stoed into self.txn_locks_map
-    // return true if all granted, false if any abort occurs
-    async fn require_read_locks(&mut self, var_names: &HashSet<String>, txn: &Txn) -> bool {
-        let mut lock_cnt = 0;
-        let mut locks_granted: HashSet<LockWorkerInfo> = HashSet::new();
-        for var_nm in var_names.iter() {
-            let sender_to_this_var = self.senders_to_workers.get(var_nm).unwrap().clone();
-            let lock_req_msg = Message::VarLockRequest {
-                lock_kind: LockKind::Read,
-                txn: txn.clone(),
-            };
-            let _ = sender_to_this_var.send(lock_req_msg).await.unwrap();
-        }
-        while lock_cnt < var_names.len() {
-            if let Some(grant_msg) = self.receiver_from_workers.recv().await {
-                lock_cnt += 1;
-                match grant_msg {
-                    Message::VarLockGranted {
-                        txn: resp_txn,
-                        from_name,
-                    } => {
-                        assert_eq!(
-                            resp_txn.id, txn.id,
-                            "{color_red}should not receive grant \
-msg for other txns, but is this implementation correct?{color_reset}"
-                        );
-                        locks_granted.insert(LockWorkerInfo {
-                            lock: Lock {
-                                lock_kind: LockKind::Read,
-                                txn: resp_txn,
-                            },
-                            worker_name: from_name,
-                        });
+    // return true if all granted, return false immediately if any abort occurs
+    /*     async fn read_vars(
+            &mut self,
+            var_names: &HashSet<String>,
+            temp_val_env: &mut HashMap<String, Val>,
+            txn: &Txn,
+        ) -> bool {
+            let mut lock_cnt = 0;
+            let mut locks_granted: HashSet<LockWorkerInfo> = HashSet::new();
+            for var_nm in var_names.iter() {
+                let sender_to_this_var = self.senders_to_workers.get(var_nm).unwrap().clone();
+                let lock_req_msg = Message::VarLockRequest {
+                    lock_kind: LockKind::Read,
+                    txn: txn.clone(),
+                };
+                let _ = sender_to_this_var.send(lock_req_msg).await.unwrap();
+            }
+            // sequentially receiving responses should be OK because manager
+            // has only one (sequential) thread, cannot pass onto another transaction
+            // if one has not yet finished.
+            while lock_cnt < var_names.len() {
+                if let Some(grant_msg) = self.receiver_from_workers.recv().await {
+                    lock_cnt += 1;
+                    match grant_msg {
+                        Message::VarLockGranted {
+                            txn: resp_txn,
+                            from_name,
+                        } => {
+                            assert_eq!(
+                                resp_txn.id, txn.id,
+                                "{color_red}should not receive grant \
+    msg for other txns, but is this implementation correct?{color_reset}"
+                            );
+                            locks_granted.insert(LockWorkerInfo {
+                                lock: Lock {
+                                    lock_kind: LockKind::Read,
+                                    txn: resp_txn,
+                                },
+                                worker_name: from_name.clone(),
+                            });
+                            let var_value = self.read_single_var(from_name.clone()).await.unwrap();
+                            temp_val_env.insert(from_name, var_value);
+                        }
+                        Message::VarLockAbort { txn: resp_txn } => {
+                            assert_eq!(
+                                resp_txn.id, txn.id,
+                                "{color_red}should not receive grant \
+    msg for other txns, but is this implementation correct?{color_reset}"
+                            );
+                            println!(
+                                "{color_yellow}read lock for txn {:?} aborted{color_reset}",
+                                resp_txn.id
+                            );
+                            temp_val_env.clear();
+                            return false;
+                        }
+                        _ => panic!(
+                            "{color_red}should not receive non-grant message when \
+    require read locks, but really?{color_reset}"
+                        ),
                     }
-                    Message::VarLockAbort { txn: resp_txn } => {
-                        assert_eq!(
-                            resp_txn.id, txn.id,
-                            "{color_red}should not receive grant \
-msg for other txns, but is this implementation correct?{color_reset}"
-                        );
-                        println!(
-                            "{color_yellow}read lock for txn {:?} aborted{color_reset}",
-                            resp_txn.id
-                        );
-                        return false;
-                    }
-                    _ => panic!(
-                        "{color_red}should not receive non-grant message when \
-require read locks, but really?{color_reset}"
-                    ),
                 }
             }
-        }
-        true
-    }
+            true
+        } */
 
-    async fn read_var(&mut self, var_name: String) -> Option<Val> {
-        todo!()
+    // request lock, read and return. return None if LOCK ABORT.
+    async fn read_single_var(&mut self, var_name: &str, txn: &Txn) -> Option<Val> {
+        let sender_to_this_var = self.senders_to_workers.get(var_name).unwrap().clone();
+        let lock_req_msg = Message::VarLockRequest {
+            lock_kind: LockKind::Read,
+            txn: txn.clone(),
+        };
+        let _ = sender_to_this_var.send(lock_req_msg).await.unwrap();
+        if let Some(grant_msg) = self.receiver_from_workers.recv().await {
+            match grant_msg {
+                Message::VarLockGranted {
+                    txn: resp_txn,
+                    from_name,
+                } => {
+                    assert_eq!(
+                        resp_txn.id, txn.id,
+                        "{color_red}should not receive grant \
+msg for other txns, but is this implementation correct?{color_reset}"
+                    );
+                    let txn_lock_ref = self.txn_locks_map.get_mut(&txn.id).unwrap();
+                    txn_lock_ref.insert(LockWorkerInfo {
+                        lock: Lock {
+                            lock_kind: LockKind::Read,
+                            txn: txn.clone(),
+                        },
+                        worker_name: from_name,
+                    });
+                    let read_req_msg = Message::UsrReadVarRequest { txn: txn.clone() };
+                    let _ = sender_to_this_var.send(read_req_msg).await.unwrap();
+                    if let Some(read_resp_msg) = self.receiver_from_workers.recv().await {
+                        match read_resp_msg {
+                            Message::UsrReadVarResult {
+                                var_name: rslt_var_name,
+                                result,
+                                result_preds,
+                                txn: read_rslt_txn,
+                            } => {
+                                assert_eq!(
+                                    read_rslt_txn.id, txn.id,
+                                    "{color_red}should not receive read rslt \
+msg for other txns, but is this implementation correct?{color_reset}"
+                                );
+                                assert_eq!(rslt_var_name, var_name);
+                                return Some(result.unwrap());
+                            }
+                            _ => panic!(
+                                "{color_red}should not receive non read rslt message \
+when require read locks, but really?{color_reset}"
+                            ),
+                        }
+                    }
+                }
+                Message::VarLockAbort { txn: resp_txn } => {
+                    assert_eq!(
+                        resp_txn.id, txn.id,
+                        "{color_red}should not receive abort \
+msg for other txns, but is this implementation correct?{color_reset}"
+                    );
+                    return None;
+                }
+                _ => panic!(
+                    "{color_red}should not receive non-grant message when \
+require read locks, but really?{color_reset}"
+                ),
+            }
+        }
+        panic!("should not come to here!")
     }
 
     // Do we really need the instruction `close(txn_id)`?
