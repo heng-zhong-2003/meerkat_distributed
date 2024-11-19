@@ -1,6 +1,7 @@
 use crate::{
     frontend::typecheck::Type,
     runtime::{
+        eval_expr,
         lock::{Lock, LockKind},
         message::{self, Message, Val},
         transaction::{Txn, TxnId, WriteToName},
@@ -8,7 +9,10 @@ use crate::{
 };
 
 use inline_colorization::*;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Deref,
+};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -40,6 +44,7 @@ pub struct Manager {
     pub txn_locks_map: HashMap<TxnId, HashSet<LockWorkerInfo>>,
     // { name |-> { subscribers } }
     pub dependency_graph: HashMap<String, HashSet<String>>,
+    pub most_recently_applied_txn: Option<Txn>,
 }
 
 impl Manager {
@@ -53,6 +58,7 @@ impl Manager {
             worker_kind_env: HashMap::new(),
             txn_locks_map: HashMap::new(),
             dependency_graph: HashMap::new(),
+            most_recently_applied_txn: None,
         }
     }
 
@@ -68,10 +74,13 @@ impl Manager {
             let mut temp_val_env: HashMap<String, Val> = HashMap::new();
             let mut read_abort = false;
             let mut write_abort = false;
+            let mut this_txn_write_requires = HashSet::new();
             for nm in names_read_by_txn.iter() {
                 let var_or_def = self.worker_kind_env.get(nm).unwrap();
                 if *var_or_def == WorkerKind::Var {
-                    let opt_val = self.read_single_var(nm, txn).await;
+                    let opt_val = self
+                        .read_single_var(nm, txn, &mut this_txn_write_requires)
+                        .await;
                     if opt_val == None {
                         read_abort = true;
                         break;
@@ -91,10 +100,36 @@ impl Manager {
                         .await
                         .unwrap();
                 }
+                continue;
             }
             for w2n in txn.writes.iter() {
-                todo!()
+                let var_or_def = self.worker_kind_env.get(&w2n.name).unwrap();
+                assert_eq!(*var_or_def, WorkerKind::Var);
+                let write_success = self.write_single_var(w2n, &temp_val_env, txn).await;
+                if !write_success {
+                    write_abort = true;
+                    break;
+                }
             }
+            if write_abort {
+                for nm in names_read_by_txn.iter() {
+                    let sender_to_this_nm = self.senders_to_workers.get(nm).unwrap().clone();
+                    let _ = sender_to_this_nm
+                        .send(Message::VarLockAbort { txn: txn.clone() })
+                        .await
+                        .unwrap();
+                }
+                for nm in names_written_by_txn.iter() {
+                    let sender_to_this_nm = self.senders_to_workers.get(nm).unwrap().clone();
+                    let _ = sender_to_this_nm
+                        .send(Message::VarLockAbort { txn: txn.clone() })
+                        .await
+                        .unwrap();
+                }
+                continue;
+            }
+            self.release_var_locks(txn, &this_txn_write_requires).await;
+            break;
         }
     }
 
@@ -166,7 +201,12 @@ impl Manager {
         } */
 
     // request lock, read and return. return None if LOCK ABORT.
-    async fn read_single_var(&mut self, var_name: &str, txn: &Txn) -> Option<Val> {
+    async fn read_single_var(
+        &mut self,
+        var_name: &str,
+        txn: &Txn,
+        this_txn_write_requires: &mut HashSet<Txn>,
+    ) -> Option<Val> {
         let sender_to_this_var = self.senders_to_workers.get(var_name).unwrap().clone();
         let lock_req_msg = Message::VarLockRequest {
             lock_kind: LockKind::Read,
@@ -208,6 +248,11 @@ msg for other txns, but is this implementation correct?{color_reset}"
 msg for other txns, but is this implementation correct?{color_reset}"
                                 );
                                 assert_eq!(rslt_var_name, var_name);
+                                let read_last_txn =
+                                    result_preds.into_iter().max_by(|x, y| x.id.cmp(&y.id));
+                                if read_last_txn != None {
+                                    this_txn_write_requires.insert(read_last_txn.unwrap());
+                                }
                                 return Some(result.unwrap());
                             }
                             _ => panic!(
@@ -241,7 +286,66 @@ require read locks, but really?{color_reset}"
         val_env: &HashMap<String, Val>,
         txn: &Txn,
     ) -> bool {
-        todo!()
+        let mut opt_val_env = HashMap::new();
+        for (nm, v) in val_env.iter() {
+            opt_val_env.insert(nm.clone(), Some(v.clone()));
+        }
+        let write_val = eval_expr::evaluate_expr(&write_to_var.expr, &opt_val_env).unwrap();
+        let lock_req_msg = Message::VarLockRequest {
+            lock_kind: LockKind::Write,
+            txn: txn.clone(),
+        };
+        let sender_to_this_var = self
+            .senders_to_workers
+            .get(&write_to_var.name)
+            .unwrap()
+            .clone();
+        let _ = sender_to_this_var.send(lock_req_msg).await.unwrap();
+        if let Some(grant_msg) = self.receiver_from_workers.recv().await {
+            match grant_msg {
+                Message::VarLockGranted {
+                    txn: resp_txn,
+                    from_name,
+                } => {
+                    assert_eq!(resp_txn.id, txn.id);
+                    assert_eq!(from_name, write_to_var.name);
+                    let txn_lock_ref = self.txn_locks_map.get_mut(&txn.id).unwrap();
+                    txn_lock_ref.insert(LockWorkerInfo {
+                        lock: Lock {
+                            lock_kind: LockKind::Write,
+                            txn: txn.clone(),
+                        },
+                        worker_name: from_name,
+                    });
+                    let write_msg = Message::UsrWriteVarRequest {
+                        txn: txn.clone(),
+                        write_val: write_val,
+                    };
+                    let _ = sender_to_this_var.send(write_msg).await.unwrap();
+                }
+                Message::VarLockAbort { txn: resp_txn } => {
+                    assert_eq!(resp_txn.id, txn.id);
+                    return false;
+                }
+                _ => panic!(),
+            }
+        }
+        true
+    }
+
+    async fn release_var_locks(&mut self, txn: &Txn, this_txn_write_requires: &HashSet<Txn>) {
+        let lwis_ref = self.txn_locks_map.get(&txn.id).unwrap();
+        for lwi in lwis_ref.iter() {
+            let sender_to_this_worker = self.senders_to_workers.get(&lwi.worker_name).unwrap();
+            let var_lock_release_msg = Message::VarLockRelease {
+                txn: txn.clone(),
+                requires: this_txn_write_requires.clone(),
+            };
+            let _ = sender_to_this_worker
+                .send(var_lock_release_msg)
+                .await
+                .unwrap();
+        }
     }
 
     // Do we really need the instruction `close(txn_id)`?

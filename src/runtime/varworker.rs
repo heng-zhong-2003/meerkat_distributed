@@ -25,6 +25,7 @@ pub struct VarWorker {
     pub senders_to_subscribers: HashMap<String, Sender<Message>>,
     // Can abstract all four into Worker, see hig-demo repo
     pub value: Option<Val>,
+    pub next_value: Option<Val>,
 
     pub locks: HashSet<Lock>,
     pub lock_queue: HashSet<Lock>,
@@ -56,6 +57,7 @@ impl VarWorker {
             sender_to_manager,
             senders_to_subscribers: HashMap::new(),
             value: None,
+            next_value: None,
             locks: HashSet::new(),
             lock_queue: HashSet::new(),
             pending_writes: HashSet::new(),
@@ -100,7 +102,7 @@ impl VarWorker {
                 }
             }
             // TODO: apply pending writes, the remove lock
-            Message::VarLockRelease { txn } => {
+            Message::VarLockRelease { txn, requires } => {
                 let to_be_removed: HashSet<Lock> = self
                     .locks
                     .iter()
@@ -160,11 +162,7 @@ impl VarWorker {
                     // todo!()
                 }
             }
-            Message::UsrWriteVarRequest {
-                txn,
-                write_val,
-                requires,
-            } => {
+            Message::UsrWriteVarRequest { txn, write_val } => {
                 let mut w_lock_granted = false;
                 // Just dummy lock to convince rust that w_lock_for_txn is always
                 // initialized. In fact if not w_locked, program panics.
@@ -194,7 +192,7 @@ impl VarWorker {
                         },
                         value: write_val,
                     });
-                    self.next_pred_set.extend(requires.iter().cloned());
+                    // self.next_pred_set.extend(requires.iter().cloned());
                 }
             }
             #[allow(unreachable_patterns)]
@@ -312,7 +310,6 @@ async fn write_then_read() {
     let write_msg = Message::UsrWriteVarRequest {
         txn: write_txn.clone(),
         write_val: Val::Int(5),
-        requires: HashSet::new(),
     };
     let _ = sndr_to_worker.send(write_msg).await.unwrap();
 

@@ -31,7 +31,6 @@ pub enum Message {
     UsrWriteVarRequest {
         txn: Txn,
         write_val: Val,
-        requires: HashSet<Txn>,
     },
     UsrReadDefRequest {
         txn: Txn,
@@ -67,6 +66,7 @@ pub enum Message {
     },
     VarLockRelease {
         txn: Txn,
+        requires: HashSet<Txn>,
     },
     VarLockGranted {
         txn: Txn,
