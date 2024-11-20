@@ -125,9 +125,12 @@ impl VarWorker {
                     provides: {
                         let mut pvd = HashSet::new();
                         match self.latest_write_txn {
-                            Some(ref t) => { pvd.insert(t.clone()); }
+                            Some(ref t) => {
+                                pvd.insert(t.clone());
+                            }
                             None => {}
-                        } pvd
+                        }
+                        pvd
                     },
                     trans_dep_set: HashSet::from_iter(vec![self.name.clone()]),
                 };
