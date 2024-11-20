@@ -120,18 +120,16 @@ impl VarWorker {
                 self.senders_to_subscribers
                     .insert(subscriber_name, sender_to_subscriber.clone());
                 let respond_msg = Message::SubscriptionGranted {
-                    from_name: self.name.clone(),
+                    name: self.name.clone(),
                     value: self.value.clone(),
                     provides: {
                         let mut pvd = HashSet::new();
                         match self.latest_write_txn {
-                            Some(ref t) => {
-                                pvd.insert(t.clone());
-                            }
+                            Some(ref t) => { pvd.insert(t.clone()); }
                             None => {}
-                        }
-                        pvd
+                        } pvd
                     },
+                    trans_dep_set: HashSet::from_iter(vec![self.name.clone()]),
                 };
                 let _ = sender_to_subscriber.send(respond_msg).await.unwrap();
             }
@@ -182,7 +180,7 @@ impl VarWorker {
                 //     self.locks
                 // );
                 if !w_lock_granted {
-                    panic!("attempt to write when no write lock");
+                    panic!("in var worker attempt to write when no write lock");
                 } else {
                     self.locks.remove(&w_lock_for_txn);
                     self.pending_writes.insert(PendingWrite {

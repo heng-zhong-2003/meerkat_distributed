@@ -98,6 +98,12 @@ use inline_colorization::*;
 
 use super::varworker::PendingWrite;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PendingCodeUpdate {
+    pub w_lock: Lock,
+    pub expr: Expr,
+}
+
 pub struct DefWorker {
     pub name: String,
     pub receiver_from_manager: Receiver<Message>,
@@ -111,14 +117,13 @@ pub struct DefWorker {
     pub propa_changes_to_apply: HashMap<TxnAndName, _PropaChange>,
 
     // for now expr is list of name or values calculating their sum
-    pub expr: Vec<Val>,
+    pub expr: Expr,
     // direct dependency and their current value
     pub replica: HashMap<String, Option<Val>>,
     // transtitive dependencies: handled by srvmanager for local dependencies
     // and SubscribeRequest/Grant for global dependencies
     pub transtitive_deps: HashMap<String, HashSet<String>>,
-    // var ->->-> input(def)
-    // input(def) -> var
+    // input(def) -> vars that the input(def) depend on
     /*
       a   b   c
        \  |  /
@@ -131,7 +136,7 @@ pub struct DefWorker {
 
     pub locks: HashSet<Lock>,
     pub lock_queue: HashSet<Lock>,
-    pub pending_writes: HashSet<PendingWrite>,
+    pub pending_writes: HashSet<PendingCodeUpdate>,
 }
 
 impl DefWorker {
@@ -139,7 +144,7 @@ impl DefWorker {
         name: &str,
         receiver_from_manager: Receiver<Message>,
         sender_to_manager: mpsc::Sender<Message>,
-        expr: Vec<Val>,
+        expr: Expr,
         replica: HashMap<String, Option<Val>>, // HashMap { dependent name -> None }
         transtitive_deps: HashMap<String, HashSet<String>>,
     ) -> DefWorker {
@@ -179,9 +184,20 @@ impl DefWorker {
         false
     }
 
+    pub fn apply_code_update(&mut self, expr: Expr) {
+        self.expr = expr;
+        todo!("parse out input(expr)");
+        todo!("subscribe all input(expr)");
+        todo!("from subscribeGranted messsage, build transtitive_deps");
+        todo!("clear all previous `era` trace")
+    }
+
     pub async fn handle_message(&mut self, msg: Message) {
         match msg {
-            Message::DefLockRequest { lock_kind, txn } => {
+            Message::DefLockRequest { 
+                lock_kind, 
+                txn 
+            } => {
                 let mut oldest_txn_id = txn.id.clone();
                 for lock in self.locks.iter() {
                     if lock.txn.id <= oldest_txn_id {
@@ -201,6 +217,17 @@ impl DefWorker {
                         .send(Message::DefLockAbort { txn: txn })
                         .await
                         .unwrap();
+                }
+            }
+            Message::DefLockRelease { txn } => {
+                let to_be_removed: HashSet<Lock> = self
+                    .locks
+                    .iter()
+                    .cloned()
+                    .filter(|t| t.txn.id == txn.id)
+                    .collect();
+                for tbr in to_be_removed.iter() {
+                    self.locks.remove(tbr);
                 }
             }
             Message::DevReadDefRequest { txn } => {
@@ -227,20 +254,31 @@ impl DefWorker {
                     None => panic!(),
                 }
             }
-            Message::DevWriteRequest { txn, write_expr } => {
-                todo!()
-            }
-
-            Message::DefLockRelease { txn } => {
-                let to_be_removed: HashSet<Lock> = self
-                    .locks
-                    .iter()
-                    .cloned()
-                    .filter(|t| t.txn.id == txn.id)
-                    .collect();
-                for tbr in to_be_removed.iter() {
-                    self.locks.remove(tbr);
+            Message::DevWriteDefRequest { 
+                txn, 
+                write_expr 
+            } => {
+                let mut w_lock_granted = false;
+                let mut w_lock_for_txn: Option<Lock> = None;
+                for lk in self.locks.iter() {
+                    if lk.lock_kind == LockKind::Write && lk.txn.id == txn.id {
+                        w_lock_granted = true;
+                        w_lock_for_txn = Some(lk.clone());
+                    }
                 }
+                if !w_lock_granted {
+                    panic!("in def worker attempt to write when no write lock");
+                } else {
+                    self.locks.remove(&(w_lock_for_txn.unwrap()));
+                    self.pending_writes.insert(PendingCodeUpdate{
+                        w_lock: Lock {
+                            lock_kind: LockKind::Write,
+                            txn: txn.clone(),
+                        },
+                        expr: write_expr,
+                    });
+                }
+                todo!()
             }
             Message::UsrReadDefRequest { txn, requires } => {
                 let result_pred = self.pred_txns.clone().into_iter().collect();
@@ -276,6 +314,28 @@ impl DefWorker {
                     &self.propa_changes_to_apply
                 );
             }
+            Message::Subscribe { 
+                subscriber_name, 
+                sender_to_subscriber 
+            } => {
+               self.senders_to_subscribers.insert(subscriber_name, sender_to_subscriber.clone());
+               let respond_msg = Message::SubscriptionGranted { 
+                    name: self.name.clone(), 
+                    value: self.value.clone(), 
+                    provides: HashSet::from_iter(self.pred_txns.clone()), // not sure!!
+                    trans_dep_set: self.transtitive_deps.values().fold(HashSet::new(), 
+                        |mut acc, set| {acc.extend(set.iter().cloned()); acc}), 
+                };
+                let _ = sender_to_subscriber.send(respond_msg).await.unwrap();
+            }
+            Message::SubscriptionGranted { 
+                name, 
+                value, 
+                provides, 
+                trans_dep_set
+            } => {
+                todo!()
+            }
 
             // for test only
             // Message::ManagerRetrieve => {
@@ -309,6 +369,21 @@ impl DefWorker {
                 &mut def_worker.propa_changes_to_apply,
                 &mut def_worker.replica,
             );
+
+            todo!("
+                As the design said,
+                We only apply pending code update when we received and applied 
+                all propa changes based on previous version of code (another 
+                design choice is discard all remained propa changes but might 
+                be frustrating for users of the system)
+                Question: how should we determine the right time to apply code 
+                update? 
+                    soln 1. some heurstic waiting time  
+                    soln 2. keep track of txns from last `era`, once we recieve 
+                        all of them, then apply new code update 
+                    soln ??
+                ")
+            
 
             // for test, ack srvmanager
             // if new_value != None {
