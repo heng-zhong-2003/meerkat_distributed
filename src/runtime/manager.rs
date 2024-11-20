@@ -9,10 +9,7 @@ use crate::{
 };
 
 use inline_colorization::*;
-use std::{
-    collections::{HashMap, HashSet},
-    ops::Deref,
-};
+use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

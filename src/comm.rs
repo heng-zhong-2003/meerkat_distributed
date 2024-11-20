@@ -1,9 +1,6 @@
 use std::error::Error;
 
-use tokio::{
-    io::AsyncReadExt,
-    net::{TcpListener, TcpStream},
-};
+use tokio::{io::AsyncReadExt, net::TcpListener};
 
 pub async fn process_remote() -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind("127.0.0.1:1145").await?;
