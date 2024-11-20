@@ -55,7 +55,7 @@ pub enum Message {
         txn: Txn,
     },
 
-    DevWriteRequest {
+    DevWriteDefRequest {
         txn: Txn,
         write_expr: Expr,
     },
@@ -98,9 +98,10 @@ pub enum Message {
         sender_to_subscriber: Sender<Message>,
     },
     SubscriptionGranted {
-        from_name: String,
+        name: String,
         value: Option<Val>,
         provides: HashSet<Txn>,
+        trans_dep_set: HashSet<String>,
     },
 }
 
