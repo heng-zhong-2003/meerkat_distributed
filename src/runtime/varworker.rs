@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 use crate::{
     frontend::meerast::Expr,
@@ -29,7 +29,7 @@ pub struct VarWorker {
 
     pub locks: HashSet<Lock>,
     pub lock_queue: HashSet<Lock>,
-    pub pending_writes: HashSet<PendingWrite>,
+    // pub pending_writes: HashSet<PendingWrite>,
 
     // supplement page 2 top:
     // R is required to be applied before P:
@@ -60,7 +60,7 @@ impl VarWorker {
             next_value: None,
             locks: HashSet::new(),
             lock_queue: HashSet::new(),
-            pending_writes: HashSet::new(),
+            // pending_writes: HashSet::new(),
             latest_write_txn: None,
             pred_txns: HashSet::new(),
             next_pred_set: HashSet::new(),
@@ -79,29 +79,41 @@ impl VarWorker {
     pub async fn handle_message(&mut self, msg: Message) {
         match msg {
             Message::VarLockRequest { lock_kind, txn } => {
-                // let mut has_lingering_w_lock = false;
-                let mut oldest_txn_id = txn.id.clone();
-                for lk in self.locks.iter() {
-                    if lk.txn.id <= oldest_txn_id {
-                        oldest_txn_id = lk.txn.id.clone();
-                    }
-                }
-                if txn.id == oldest_txn_id
-                    || (!self.has_write_lock() && self.pending_writes.is_empty())
-                {
+                let this_lock_held = self.locks.contains(&Lock {
+                    lock_kind: lock_kind.clone(),
+                    txn: txn.clone(),
+                });
+                let older_lock_queued = self.lock_queue.iter().any(|x| x.txn.id < txn.id);
+                let one_is_write = lock_kind == LockKind::Write
+                    || self
+                        .lock_queue
+                        .iter()
+                        .any(|x| x.txn.id < txn.id && x.lock_kind == LockKind::Write);
+                if this_lock_held && older_lock_queued && one_is_write {
+                    let abort_msg = Message::VarLockAbort { txn: txn };
+                    self.sender_to_manager.send(abort_msg).await.unwrap();
+                } else {
                     self.lock_queue.insert(Lock {
                         lock_kind: lock_kind,
                         txn: txn,
                     });
-                } else {
-                    let _ = self
-                        .sender_to_manager
-                        .send(Message::VarLockAbort { txn: txn })
-                        .await
-                        .unwrap();
                 }
             }
-            // TODO: apply pending writes, the remove lock
+            /* Heng Zhong 9:45 PM
+            Hi Julia, how should the new variable semantics act with respect to the requires set
+            in the VarLockRelease { txn: Txn, requires: Txn set } message?
+
+            Julia Freeman 9:47 PM
+            since the var keeps track of all previously applied txns (P in the semantics), it should
+            union this requires set with its set of previously applied txns and store it back into P
+
+            Heng Zhong 9:54 PM
+            Thanks. Is there any case that the var should temporarily hold on the update and wait
+            for some transactions to come first in the new design?
+
+            Julia Freeman 9:57 PM
+            good question. thankfully no, vars do not ever have to wait for transactions to come in
+            based on provides / requires sets */
             Message::VarLockRelease { txn, requires } => {
                 let to_be_removed: HashSet<Lock> = self
                     .locks
@@ -109,9 +121,14 @@ impl VarWorker {
                     .cloned()
                     .filter(|t| t.txn.id == txn.id)
                     .collect();
+                self.pred_txns.extend(requires.into_iter());
+                self.value = self.next_value.clone();
                 for tbr in to_be_removed.iter() {
                     self.locks.remove(tbr);
                 }
+            }
+            Message::VarLockAbort { txn } => {
+                todo!()
             }
             Message::Subscribe {
                 subscriber_name,
@@ -159,116 +176,41 @@ impl VarWorker {
                     .await;
                 for rl in self_r_locks_held_by_txn.into_iter() {
                     self.locks.remove(&rl);
-                    // next change requires??
-                    // todo!()
                 }
             }
+            /* Initially, and when there is no current write txn, current_value is the
+            same as next_value. But when there is a write lock held, and the write
+            lock has provided a new value, next_value is where that new value goes.
+            Then, when the write txn is released, we assign current_value = next_value */
             Message::UsrWriteVarRequest { txn, write_val } => {
-                let mut w_lock_granted = false;
-                // Just dummy lock to convince rust that w_lock_for_txn is always
-                // initialized. In fact if not w_locked, program panics.
-                let mut w_lock_for_txn: Lock = Lock {
-                    lock_kind: LockKind::Read,
-                    txn: txn.clone(),
-                };
-                for lk in self.locks.iter() {
-                    if lk.lock_kind == LockKind::Write && lk.txn.id == txn.id {
-                        w_lock_granted = true;
-                        w_lock_for_txn = lk.clone();
-                        break;
-                    }
-                }
-                // println!(
-                //     "{color_blue}receive WriteVarRequest, self.locks: {:?}{color_reset}",
-                //     self.locks
-                // );
-                if !w_lock_granted {
-                    panic!("in var worker attempt to write when no write lock");
-                } else {
-                    self.locks.remove(&w_lock_for_txn);
-                    self.pending_writes.insert(PendingWrite {
-                        w_lock: Lock {
-                            lock_kind: LockKind::Write,
-                            txn: txn.clone(),
-                        },
-                        value: write_val,
-                    });
-                    // self.next_pred_set.extend(requires.iter().cloned());
-                }
+                assert!(self
+                    .locks
+                    .iter()
+                    .any(|x| x.lock_kind == LockKind::Write && x.txn.id == txn.id));
+                self.next_value = Some(write_val);
             }
             #[allow(unreachable_patterns)]
             _ => panic!(),
         }
     }
 
-    // TODO: still move lock into pending write (not yet applied)
-    // but only apply when receive release request
-    // otherwise, if another lock request for this txn aborted
-    // whole txn invalid but `immature` write cannot be recovered
     pub async fn tick(&mut self) {
-        let mut has_granted_write_lock = false;
-        for lk in self.locks.iter() {
-            if lk.lock_kind == LockKind::Write {
-                has_granted_write_lock = true;
-            }
+        if self.lock_queue.is_empty() {
+            return;
         }
-        if !has_granted_write_lock && !self.pending_writes.is_empty() && self.locks.is_empty() {
-            let pending_w = self.pending_writes.iter().next().unwrap().clone();
-            self.next_pred_set.insert(Txn {
-                id: pending_w.w_lock.txn.id.clone(),
-                writes: pending_w.w_lock.txn.writes.clone(),
-            });
-            self.next_pred_set.extend(self.pred_txns.iter().cloned());
-
-            self.value = Some(pending_w.value.clone());
-            for (_, sndr) in self.senders_to_subscribers.iter() {
-                let _ = sndr
-                    .send(Message::Propagate {
-                        propa_change: PropaChange {
-                            from_name: self.name.clone(),
-                            new_val: pending_w.value.clone(),
-                            preds: self.next_pred_set.clone(),
-                        },
-                    })
-                    .await
-                    .unwrap();
-            }
-            self.latest_write_txn = Some(pending_w.w_lock.txn.clone());
-            self.next_pred_set.clear();
-            self.locks.clear();
-            has_granted_write_lock = false;
-        }
-        while !has_granted_write_lock {
-            let mut max_queued_lock = Lock {
-                lock_kind: LockKind::Read,
-                txn: Txn {
-                    id: TxnId::new(),
-                    writes: vec![],
-                },
-            }; // dummy initial value to convince rust.
-            let mut max_assigned = false;
-            for queued_lock in self.lock_queue.iter() {
-                if !max_assigned || max_queued_lock.txn.id < queued_lock.txn.id {
-                    max_queued_lock = queued_lock.clone();
-                    max_assigned = true;
-                }
-            }
-            // there exists some lock
-            if max_assigned {
-                self.lock_queue.remove(&max_queued_lock);
-                self.locks.insert(max_queued_lock.clone());
-                let _ = self
-                    .sender_to_manager
-                    .send(Message::VarLockGranted {
-                        txn: max_queued_lock.txn.clone(),
-                        from_name: self.name.clone(),
-                    })
-                    .await
-                    .unwrap();
-            } else {
-                break;
-            }
-        }
+        let oldest_lock = self
+            .lock_queue
+            .iter()
+            .min_by(|x, y| x.txn.id.cmp(&y.txn.id))
+            .unwrap()
+            .clone();
+        self.lock_queue.remove(&oldest_lock);
+        self.locks.insert(oldest_lock.clone());
+        let lock_granted_msg = Message::VarLockGranted {
+            txn: oldest_lock.txn,
+            from_name: self.name.clone(),
+        };
+        self.sender_to_manager.send(lock_granted_msg).await.unwrap();
     }
 
     pub async fn run_varworker(mut self) {
@@ -313,6 +255,11 @@ async fn write_then_read() {
         write_val: Val::Int(5),
     };
     let _ = sndr_to_worker.send(write_msg).await.unwrap();
+    let lock_release_msg = Message::VarLockRelease {
+        txn: write_txn.clone(),
+        requires: HashSet::new(),
+    };
+    sndr_to_worker.send(lock_release_msg).await.unwrap();
 
     let read_txn = Txn {
         id: TxnId::new(),
@@ -328,7 +275,7 @@ async fn write_then_read() {
             Message::VarLockGranted { txn, from_name: _ } => {
                 println!("var read lock granted {:?}", txn);
             }
-            _ => panic!(),
+            _ => panic!("should not receive msg {:?}", msg),
         }
     }
     let read_msg = Message::UsrReadVarRequest {
