@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-
+use crate::frontend::meerast::Expr;
 use crate::runtime::{
     eval_expr::evaluate_expr,
     message::{TxnAndName, Val, _PropaChange},
@@ -81,6 +81,7 @@ pub fn apply_batch(
     prev_batch_provides: &mut HashSet<Txn>,
     propa_changes_to_apply: &mut HashMap<TxnAndName, _PropaChange>,
     replica: &mut HashMap<String, Option<Val>>,
+    expr: &Expr,
 ) -> (HashSet<Txn>, Option<Val>) {
     let mut all_provides: HashSet<Txn> = HashSet::new();
 
@@ -121,7 +122,7 @@ pub fn apply_batch(
         "{color_yellow}replica before compute_val: {:?}{color_reset}",
         replica
     );
-    *value = compute_val(&replica);
+    *value = evaluate_expr(expr,&replica);
     println!(
         "{color_yellow}value after compute_val: {:?}{color_reset}",
         value

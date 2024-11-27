@@ -446,6 +446,7 @@ impl DefWorker {
                 &mut self.prev_batch_provides,
                 &mut self.propa_changes_to_apply,
                 &mut self.replica,
+                &self.expr,
             );
 
             
