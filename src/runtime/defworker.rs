@@ -409,7 +409,9 @@ impl DefWorker {
                     self.apply_code_update();
                 }
             }
-            Message::DeSubscriptionGranted { name,} => {}
+            Message::DeSubscriptionGranted { name,} => {
+                todo!("")
+            }
 
             // for test only
             // Message::ManagerRetrieve => {
