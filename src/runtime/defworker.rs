@@ -22,8 +22,12 @@ Service Manager:
 
 // One problem:
 // for a defwork, code update vs pending change message (v, P, R), which apply first
-// - idea 1 : ignore all pending change messages
-// - idea 2 : wait for all pending change messages to finish
+// - idea 1 : ignore all pending change messages (code update has precedence over user's, may have glitch)
+// - idea 1.5: when propa changes involving transaction from last 'epoch' are received
+//   we still process them based on latest version of def. If 
+// - next step to think about:
+    // - idea 2 : wait for all pending change messages to finish
+    // - idea 3 : when update don't change type, can we lock less
 /*
 update {
     var c = 1;
@@ -79,7 +83,7 @@ dev2 update {
 
 use std::{
     collections::{HashMap, HashSet},
-    hash::Hash,
+    hash::Hash, thread::panicking,
 };
 
 use crate::{
@@ -93,20 +97,26 @@ use crate::{
 };
 
 use tokio::sync::mpsc::{self, Receiver, Sender};
+const BUFFER_SIZE: usize = 1024;
+
 
 use inline_colorization::*;
 
-use super::varworker::PendingWrite;
+use super::{eval_expr::{self, evaluate_expr}, message, varworker::PendingWrite};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub struct PendingCodeUpdate {
-    pub w_lock: Lock,
+    // pub w_lock: Lock,
     pub expr: Expr,
+    pub inputs_data: HashMap<String, Option<(Option<Val>, HashSet<Txn>, HashSet<String>)>>,
 }
 
 pub struct DefWorker {
     pub name: String,
-    pub receiver_from_manager: Receiver<Message>,
+    pub inbox: Receiver<Message>, 
+    pub inbox_sender: Sender<Message>,
+    // Anrui: rename it to inbox, as it's created and used by def worker as general 
+    // inbox, not only receiving messages from service manager
     pub sender_to_manager: Sender<Message>,
     pub senders_to_subscribers: HashMap<String, Sender<Message>>,
 
@@ -136,21 +146,23 @@ pub struct DefWorker {
 
     pub locks: HashSet<Lock>,
     pub lock_queue: HashSet<Lock>,
-    pub pending_writes: HashSet<PendingCodeUpdate>,
+    pub pending_write: Option<PendingCodeUpdate>,
 }
 
 impl DefWorker {
     pub fn new(
         name: &str,
-        receiver_from_manager: Receiver<Message>,
         sender_to_manager: mpsc::Sender<Message>,
         expr: Expr,
         replica: HashMap<String, Option<Val>>, // HashMap { dependent name -> None }
         transtitive_deps: HashMap<String, HashSet<String>>,
     ) -> DefWorker {
+        let (sndr, rcvr) = mpsc::channel(BUFFER_SIZE);
         DefWorker {
             name: name.to_string(),
-            receiver_from_manager,
+            inbox: rcvr,
+            inbox_sender: sndr,
+            
             sender_to_manager,
             senders_to_subscribers: HashMap::new(),
 
@@ -166,7 +178,7 @@ impl DefWorker {
 
             locks: HashSet::new(),
             lock_queue: HashSet::new(),
-            pending_writes: HashSet::new(),
+            pending_write: None,
         }
     }
 
@@ -184,12 +196,42 @@ impl DefWorker {
         false
     }
 
-    pub fn apply_code_update(&mut self, expr: Expr) {
-        self.expr = expr;
-        todo!("parse out input(expr)");
-        todo!("subscribe all input(expr)");
-        todo!("from subscribeGranted messsage, build transtitive_deps");
-        todo!("clear all previous `era` trace")
+    pub async fn tick(&mut self) {
+        if self.lock_queue.is_empty() {
+            return;
+        }
+        let oldest_lock = self
+            .lock_queue
+            .iter()
+            .min_by(|x, y| x.txn.id.cmp(&y.txn.id))
+            .unwrap()
+            .clone();
+        self.lock_queue.remove(&oldest_lock);
+        self.locks.insert(oldest_lock.clone());
+        let lock_granted_msg = Message::VarLockGranted {
+            txn: oldest_lock.txn,
+            from_name: self.name.clone(),
+        };
+        self.sender_to_manager.send(lock_granted_msg).await.unwrap();
+    }
+
+    pub fn apply_code_update(&mut self) {
+        // we have everything stored in PendingCodeUpdate, now we can apply update
+        let pcu =  self.pending_write.as_ref().unwrap();
+        self.expr = pcu.expr.clone();
+        
+        
+        for (name, op_data) in pcu.inputs_data.iter() {
+            let data = op_data.as_ref().unwrap();
+            self.replica.insert(name.to_string(), data.0.clone());
+            todo!("process provides accumulated by the input node?");
+            
+            
+            self.transtitive_deps.insert(name.to_string(), data.2.clone());
+        }
+
+        self.value = evaluate_expr(&self.expr, &self.replica);
+        self.pending_write = None;
     }
 
     pub async fn handle_message(&mut self, msg: Message) {
@@ -205,7 +247,7 @@ impl DefWorker {
                     }
                 }
                 if txn.id == oldest_txn_id
-                    || (!self.has_write_lock() && self.pending_writes.is_empty())
+                    || (!self.has_write_lock() && self.pending_write.is_none())
                 {
                     self.lock_queue.insert(Lock {
                         lock_kind: lock_kind,
@@ -270,20 +312,43 @@ impl DefWorker {
                     panic!("in def worker attempt to write when no write lock");
                 } else {
                     self.locks.remove(&(w_lock_for_txn.unwrap()));
-                    self.pending_writes.insert(PendingCodeUpdate{
-                        w_lock: Lock {
-                            lock_kind: LockKind::Write,
-                            txn: txn.clone(),
-                        },
-                        expr: write_expr,
+
+                    // now start processing the update
+                    let inputs = write_expr.names_contained();
+                    let old_inputs = self.replica.keys().cloned().collect();
+                    let added_inputs: HashSet<String> = inputs.difference(&old_inputs).cloned().collect();
+                    let deleted_inputs: HashSet<String> = old_inputs.difference(&inputs).cloned().collect();
+
+                    // request subscription for all inputs, 
+                    // service manager will handle the following
+                    for input_name in added_inputs.iter() {
+                        let _ = self.sender_to_manager.send(Message::Subscribe { 
+                            subscribe_who: input_name.clone(), 
+                            subscriber_name: self.name.clone(),
+                            sender_to_subscriber: self.inbox_sender.clone(), 
+                        });
+                    } 
+                    for input_name in deleted_inputs.iter() {
+                        let _ = self.sender_to_manager.send(Message::DeSubscribe { 
+                            desubscribe_who: input_name.clone(),
+                            desubscriber_name: self.name.clone(), 
+                        });
+                    } 
+
+                    self.pending_write = Some(PendingCodeUpdate{
+                        // w_lock: Lock {
+                        //     lock_kind: LockKind::Write,
+                        //     txn: txn.clone(),
+                        // },
+                        expr: write_expr.clone(),
+                        inputs_data: added_inputs.into_iter().map(|name| (name.to_string(), None)).collect(),
                     });
                 }
-                todo!()
             }
             Message::UsrReadDefRequest { txn, requires } => {
                 let result_pred = self.pred_txns.clone().into_iter().collect();
                 let msg_back = Message::UsrReadDefResult {
-                    // TODO(Opt): set smaller than applied_txns should also work ...
+                    // TODO(Optional optimization): set smaller than applied_txns should also work ...
                     txn: txn.clone(),
                     name: self.name.clone(),
                     result: self.value.clone(),
@@ -292,29 +357,33 @@ impl DefWorker {
                 let _ = self.sender_to_manager.send(msg_back).await;
             }
             Message::Propagate { propa_change } => {
-                println!("{color_blue}PropaMessage{color_reset}");
-                let _propa_change = Self::processed_propachange(
-                    &mut self.counter,
-                    &propa_change,
-                    &mut self.transtitive_deps,
-                );
-
-                for txn in &propa_change.preds {
-                    println!("{color_blue}insert propa_changes_to_apply{color_reset}");
-                    self.propa_changes_to_apply.insert(
-                        TxnAndName {
-                            txn: txn.clone(),
-                            name: propa_change.from_name.clone(),
-                        },
-                        _propa_change.clone(),
+                if self.replica.contains_key(&propa_change.from_name) {
+                // Follows idea 1, ignore all irrelavant propagate messages
+                    println!("{color_blue}PropaMessage{color_reset}");
+                    let _propa_change = Self::processed_propachange(
+                        &mut self.counter,
+                        &propa_change,
+                        &mut self.transtitive_deps,
                     );
-                }
-                println!(
-                    "after receiving propamsg, the graph is {:#?}",
-                    &self.propa_changes_to_apply
-                );
+
+                    for txn in &propa_change.preds {
+                        println!("{color_blue}insert propa_changes_to_apply{color_reset}");
+                        self.propa_changes_to_apply.insert(
+                            TxnAndName {
+                                txn: txn.clone(),
+                                name: propa_change.from_name.clone(),
+                            },
+                            _propa_change.clone(),
+                        );
+                    }
+                    println!(
+                        "after receiving propamsg, the graph is {:#?}",
+                        &self.propa_changes_to_apply
+                    );
+                } 
             }
             Message::Subscribe { 
+                subscribe_who,
                 subscriber_name, 
                 sender_to_subscriber 
             } => {
@@ -334,8 +403,13 @@ impl DefWorker {
                 provides, 
                 trans_dep_set
             } => {
-                todo!()
+                let pcu = self.pending_write.as_mut().unwrap();
+                pcu.inputs_data.insert(name, Some((value, provides, trans_dep_set))); 
+                if pcu.inputs_data.values().all(|v| v.is_some()) {
+                    self.apply_code_update();
+                }
             }
+            Message::DeSubscriptionGranted { name,} => {}
 
             // for test only
             // Message::ManagerRetrieve => {
@@ -349,40 +423,32 @@ impl DefWorker {
         }
     }
 
-    pub async fn run_defworker(mut def_worker: DefWorker) {
-        while let Some(msg) = def_worker.receiver_from_manager.recv().await {
+    pub async fn run_defworker(mut self) {
+        while let Some(msg) = self.inbox.recv().await {
             println!("{color_red}defworker receive msg {:?}{color_reset}", msg);
-            let _ = DefWorker::handle_message(&mut def_worker, msg).await;
+            // handle messages
+            let _ = DefWorker::handle_message(&mut self, msg).await;
+
+            // evict next lock
+            let _ = self.tick().await;
 
             // search for valid batch
             let valid_batch =
-                search_batch(&def_worker.propa_changes_to_apply, &def_worker.pred_txns);
+                search_batch(&self.propa_changes_to_apply, &self.pred_txns);
 
             // apply valid batch
             println!("{color_yellow}apply batch called{color_reset}");
             let (all_provides, new_value) = apply_batch(
                 valid_batch,
                 // &def_worker.worker,
-                &mut def_worker.value,
-                &mut def_worker.pred_txns,
-                &mut def_worker.prev_batch_provides,
-                &mut def_worker.propa_changes_to_apply,
-                &mut def_worker.replica,
+                &mut self.value,
+                &mut self.pred_txns,
+                &mut self.prev_batch_provides,
+                &mut self.propa_changes_to_apply,
+                &mut self.replica,
             );
 
-            todo!("
-                As the design said,
-                We only apply pending code update when we received and applied 
-                all propa changes based on previous version of code (another 
-                design choice is discard all remained propa changes but might 
-                be frustrating for users of the system)
-                Question: how should we determine the right time to apply code 
-                update? 
-                    soln 1. some heurstic waiting time  
-                    soln 2. keep track of txns from last `era`, once we recieve 
-                        all of them, then apply new code update 
-                    soln ??
-                ")
+            
             
 
             // for test, ack srvmanager

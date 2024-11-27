@@ -131,6 +131,7 @@ impl VarWorker {
                 todo!()
             }
             Message::Subscribe {
+                subscribe_who,
                 subscriber_name,
                 sender_to_subscriber,
             } => {

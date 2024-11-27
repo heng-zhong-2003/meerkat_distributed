@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::runtime::{
-    eval_expr::compute_val,
+    eval_expr::evaluate_expr,
     message::{TxnAndName, Val, _PropaChange},
     transaction::Txn,
 };

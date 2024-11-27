@@ -94,14 +94,23 @@ pub enum Message {
         propa_change: PropaChange, // a small change, make batch valid easier
     },
     Subscribe {
+        subscribe_who: String,
         subscriber_name: String,
         sender_to_subscriber: Sender<Message>,
+    },
+    DeSubscribe { // cancel subscription
+        desubscribe_who: String,
+        desubscriber_name: String,
+        // sender_to_subscriber: Sender<Message>,
     },
     SubscriptionGranted {
         name: String,
         value: Option<Val>,
         provides: HashSet<Txn>,
         trans_dep_set: HashSet<String>,
+    },
+    DeSubscriptionGranted {
+        name: String,
     },
 }
 
