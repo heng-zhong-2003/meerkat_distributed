@@ -4,9 +4,9 @@ use crate::{
     frontend::meerast::Expr,
     runtime::{
         lock::{Lock, LockKind},
+        manager::Manager,
         message::{Message, PropaChange, Val},
         transaction::{Txn, TxnId, WriteToName},
-        manager::{Manager}
     },
 };
 use tokio::sync::mpsc::{self, Receiver, Sender};
@@ -132,7 +132,8 @@ impl VarWorker {
                 }
             }
             Message::VarLockAbort { txn } => {
-                todo!()
+                self.next_value = self.value.clone();
+                self.locks.retain(|x| x.txn.id != txn.id);
             }
             Message::Subscribe {
                 subscribe_who,
@@ -230,7 +231,7 @@ impl VarWorker {
 async fn write_then_read() {
     // a channel send from manager to worker
     let (sndr_to_worker, rcvr_from_manager) = mpsc::channel(1024);
-    // a channel send from worker to manager  
+    // a channel send from worker to manager
     let (sndr_to_manager, mut rcvr_from_worker) = mpsc::channel(1024);
     let worker = VarWorker::new("a", rcvr_from_manager, sndr_to_manager.clone());
     tokio::spawn(worker.run_varworker());

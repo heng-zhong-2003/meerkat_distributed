@@ -50,7 +50,7 @@ impl Manager {
     pub fn new() -> Self {
         let (sndr, rcvr) = mpsc::channel(message::BUFFER_SIZE);
         Manager {
-            sender_to_manager: sndr, // sndr created by manager
+            sender_to_manager: sndr,     // sndr created by manager
             receiver_from_workers: rcvr, // rcvr created by manager, used for workers
             senders_to_workers: HashMap::new(),
             typing_env: HashMap::new(),
@@ -156,6 +156,10 @@ impl Manager {
                         "{color_red}should not receive grant \
 msg for other txns, but is this implementation correct?{color_reset}"
                     );
+                    // TODO: check if this suffices for txn not yet in the txn_lock_map
+                    if !self.txn_locks_map.contains_key(&txn.id) {
+                        self.txn_locks_map.insert(txn.id.clone(), HashSet::new());
+                    }
                     let txn_lock_ref = self.txn_locks_map.get_mut(&txn.id).unwrap();
                     txn_lock_ref.insert(LockWorkerInfo {
                         lock: Lock {
@@ -241,6 +245,10 @@ require read locks, but really?{color_reset}"
                 } => {
                     assert_eq!(resp_txn.id, txn.id);
                     assert_eq!(from_name, write_to_var.name);
+                    // TODO: check if this suffices for txn not yet in the txn_lock_map
+                    if !self.txn_locks_map.contains_key(&txn.id) {
+                        self.txn_locks_map.insert(txn.id.clone(), HashSet::new());
+                    }
                     let txn_lock_ref = self.txn_locks_map.get_mut(&txn.id).unwrap();
                     txn_lock_ref.insert(LockWorkerInfo {
                         lock: Lock {
@@ -281,21 +289,29 @@ require read locks, but really?{color_reset}"
     }
 
     pub async fn create_varworker(&mut self, name: &str) {
-        // the channel send from manager to worker 
+        // the channel send from manager to worker
         let (sndr_from_manager, rcvr_from_manager) = mpsc::channel(BUFFER_SIZE);
-        let var_worker = VarWorker::new(
-            name, rcvr_from_manager, self.sender_to_manager.clone());
-        self.senders_to_workers.insert(name.to_string(), sndr_from_manager);
+        let var_worker = VarWorker::new(name, rcvr_from_manager, self.sender_to_manager.clone());
+        self.senders_to_workers
+            .insert(name.to_string(), sndr_from_manager);
+        // TODO. Added for testing. Does this suffice for updating the worker kind environment?
+        self.worker_kind_env
+            .insert(name.to_string(), WorkerKind::Var);
         tokio::spawn(var_worker.run_varworker());
     }
 
-    pub async fn create_defworker(&mut self, name: &str, init_expr: &Expr, transitive_deps: HashMap<String, HashSet<String>>) {
-        // the channel send from manager to worker 
+    pub async fn create_defworker(
+        &mut self,
+        name: &str,
+        init_expr: &Expr,
+        transitive_deps: HashMap<String, HashSet<String>>,
+    ) {
+        // the channel send from manager to worker
         let (defs_sndr, defs_rcvr) = mpsc::channel(BUFFER_SIZE);
         let def_worker = DefWorker::new(
-            name, 
+            name,
             defs_sndr.clone(),
-            defs_rcvr, 
+            defs_rcvr,
             self.sender_to_manager.clone(),
             init_expr,
             transitive_deps,
@@ -303,8 +319,6 @@ require read locks, but really?{color_reset}"
         self.senders_to_workers.insert(name.to_string(), defs_sndr);
         tokio::spawn(def_worker.run_defworker());
     }
-
-
 
     // Do we really need the instruction `close(txn_id)`?
     // Yes! Because need to remember {txn |-> lock_info set}
