@@ -113,8 +113,8 @@ pub struct PendingCodeUpdate {
 
 pub struct DefWorker {
     pub name: String,
-    pub inbox: Receiver<Message>, 
-    pub inbox_sender: Sender<Message>,
+    pub def_rcvr: Receiver<Message>, 
+    pub def_sndr: Sender<Message>,
     // Anrui: rename it to inbox, as it's created and used by def worker as general 
     // inbox, not only receiving messages from service manager
     pub sender_to_manager: Sender<Message>,
@@ -152,16 +152,16 @@ pub struct DefWorker {
 impl DefWorker {
     pub fn new(
         name: &str,
+        def_sndr: mpsc::Sender<Message>,
+        def_rcvr: mpsc::Receiver<Message>,
         sender_to_manager: mpsc::Sender<Message>,
-        expr: Expr,
-        replica: HashMap<String, Option<Val>>, // HashMap { dependent name -> None }
+        init_expr: &Expr,
+        // replica: HashMap<String, Option<Val>>, // HashMap { dependent name -> None }
         transtitive_deps: HashMap<String, HashSet<String>>,
     ) -> DefWorker {
-        let (sndr, rcvr) = mpsc::channel(BUFFER_SIZE);
         DefWorker {
             name: name.to_string(),
-            inbox: rcvr,
-            inbox_sender: sndr,
+            def_sndr, def_rcvr,
             
             sender_to_manager,
             senders_to_subscribers: HashMap::new(),
@@ -171,8 +171,8 @@ impl DefWorker {
             prev_batch_provides: HashSet::new(),
             propa_changes_to_apply: HashMap::new(),
 
-            expr,
-            replica,
+            expr: init_expr.clone(),
+            replica: init_expr.names_contained().into_iter().map(|name| (name, None)).collect(),
             transtitive_deps,
             counter: 0,
 
@@ -219,14 +219,15 @@ impl DefWorker {
         // we have everything stored in PendingCodeUpdate, now we can apply update
         let pcu =  self.pending_write.as_ref().unwrap();
         self.expr = pcu.expr.clone();
-        
-        
+      
         for (name, op_data) in pcu.inputs_data.iter() {
             let data = op_data.as_ref().unwrap();
+            // data.0 parent's current value 
             self.replica.insert(name.to_string(), data.0.clone());
-            todo!("process provides accumulated by the input node?");
-            
-            
+            // data.1 parent's applied transactions 
+            // todo!("process provides accumulated by the input node?");
+            self.pred_txns.extend(data.1.iter().cloned());
+            // data.2 parent's transtitive dependency
             self.transtitive_deps.insert(name.to_string(), data.2.clone());
         }
 
@@ -325,7 +326,7 @@ impl DefWorker {
                         let _ = self.sender_to_manager.send(Message::Subscribe { 
                             subscribe_who: input_name.clone(), 
                             subscriber_name: self.name.clone(),
-                            sender_to_subscriber: self.inbox_sender.clone(), 
+                            sender_to_subscriber: self.def_sndr.clone(), 
                         });
                     } 
                     for input_name in deleted_inputs.iter() {
@@ -410,7 +411,11 @@ impl DefWorker {
                 }
             }
             Message::DeSubscriptionGranted { name,} => {
-                todo!("")
+                /* todo!("
+                    we haven't implement desubscribe yet, in current implementation,
+                    we simply insert new subscriptions in current def node, without
+                    deleting no-longer-used subscriptions");
+                 */ 
             }
 
             // for test only
@@ -426,7 +431,7 @@ impl DefWorker {
     }
 
     pub async fn run_defworker(mut self) {
-        while let Some(msg) = self.inbox.recv().await {
+        while let Some(msg) = self.def_rcvr.recv().await {
             println!("{color_red}defworker receive msg {:?}{color_reset}", msg);
             // handle messages
             let _ = DefWorker::handle_message(&mut self, msg).await;

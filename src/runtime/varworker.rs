@@ -6,11 +6,14 @@ use crate::{
         lock::{Lock, LockKind},
         message::{Message, PropaChange, Val},
         transaction::{Txn, TxnId, WriteToName},
+        manager::{Manager}
     },
 };
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use inline_colorization::*;
+
+const BUFFER_SIZE: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PendingWrite {
@@ -51,6 +54,7 @@ impl VarWorker {
         receiver_from_manager: Receiver<Message>,
         sender_to_manager: Sender<Message>,
     ) -> Self {
+        // let (vars_sndr, vars_rcvr) = mpsc::channel(BUFFER_SIZE);
         VarWorker {
             name: name.to_string(),
             receiver_from_manager,
@@ -224,7 +228,9 @@ impl VarWorker {
 
 #[tokio::test]
 async fn write_then_read() {
+    // a channel send from manager to worker
     let (sndr_to_worker, rcvr_from_manager) = mpsc::channel(1024);
+    // a channel send from worker to manager  
     let (sndr_to_manager, mut rcvr_from_worker) = mpsc::channel(1024);
     let worker = VarWorker::new("a", rcvr_from_manager, sndr_to_manager.clone());
     tokio::spawn(worker.run_varworker());
@@ -307,6 +313,22 @@ var_name={:?}, result={:?}, result_provides={:?}{color_reset}",
             _ => panic!(),
         }
     }
+}
+
+#[tokio::test]
+async fn write_then_read_2() {
+    let mut manager = Manager::new();
+    manager.create_varworker("a").await;
+    let write_txn = Txn {
+        id: TxnId::new(),
+        writes: vec![WriteToName {
+            name: "a".to_string(),
+            expr: Expr::IntConst { val: 5 },
+        }],
+    };
+    manager.handle_transaction(&write_txn).await;
+    // some test on value at "a"
+    // and more functionality needed to be implemented for testing manager
 }
 
 #[tokio::test]

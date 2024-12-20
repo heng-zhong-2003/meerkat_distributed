@@ -1,5 +1,5 @@
 use crate::{
-    frontend::typecheck::Type,
+    frontend::{meerast::Expr, typecheck::Type},
     runtime::{
         eval_expr,
         lock::{Lock, LockKind},
@@ -11,6 +11,8 @@ use crate::{
 use inline_colorization::*;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc::{self, Receiver, Sender};
+
+use super::{defworker::DefWorker, message::BUFFER_SIZE, varworker::VarWorker};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum WorkerKind {
@@ -48,8 +50,8 @@ impl Manager {
     pub fn new() -> Self {
         let (sndr, rcvr) = mpsc::channel(message::BUFFER_SIZE);
         Manager {
-            sender_to_manager: sndr,
-            receiver_from_workers: rcvr,
+            sender_to_manager: sndr, // sndr created by manager
+            receiver_from_workers: rcvr, // rcvr created by manager, used for workers
             senders_to_workers: HashMap::new(),
             typing_env: HashMap::new(),
             worker_kind_env: HashMap::new(),
@@ -277,6 +279,32 @@ require read locks, but really?{color_reset}"
                 .unwrap();
         }
     }
+
+    pub async fn create_varworker(&mut self, name: &str) {
+        // the channel send from manager to worker 
+        let (sndr_from_manager, rcvr_from_manager) = mpsc::channel(BUFFER_SIZE);
+        let var_worker = VarWorker::new(
+            name, rcvr_from_manager, self.sender_to_manager.clone());
+        self.senders_to_workers.insert(name.to_string(), sndr_from_manager);
+        tokio::spawn(var_worker.run_varworker());
+    }
+
+    pub async fn create_defworker(&mut self, name: &str, init_expr: &Expr, transitive_deps: HashMap<String, HashSet<String>>) {
+        // the channel send from manager to worker 
+        let (defs_sndr, defs_rcvr) = mpsc::channel(BUFFER_SIZE);
+        let def_worker = DefWorker::new(
+            name, 
+            defs_sndr.clone(),
+            defs_rcvr, 
+            self.sender_to_manager.clone(),
+            init_expr,
+            transitive_deps,
+        );
+        self.senders_to_workers.insert(name.to_string(), defs_sndr);
+        tokio::spawn(def_worker.run_defworker());
+    }
+
+
 
     // Do we really need the instruction `close(txn_id)`?
     // Yes! Because need to remember {txn |-> lock_info set}
