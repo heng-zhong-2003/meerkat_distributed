@@ -4,7 +4,7 @@ use crate::{
     frontend::meerast::Expr,
     runtime::{
         lock::{Lock, LockKind},
-        message::{Message, Val, PropaChange},
+        message::{Message, PropaChange, Val},
         transaction::{Txn, TxnId, WriteToName},
     },
 };
@@ -24,7 +24,6 @@ pub struct VarWorker {
     pub sender_to_manager: Sender<Message>,
     pub senders_to_subscribers: HashMap<String, Sender<Message>>,
     // Can abstract all four into Worker, see hig-demo repo
-
     pub value: Option<Val>,
     pub latest_write_txn: Option<Txn>,
     pub locks: HashSet<Lock>,
@@ -230,12 +229,13 @@ impl VarWorker {
             self.value = Some(pending_w.value.clone());
             for (_, sndr) in self.senders_to_subscribers.iter() {
                 let _ = sndr
-                    .send(Message::Propagate { propa_change: PropaChange {
-                        from_name: self.name.clone(),
-                        new_val: pending_w.value.clone(),
-                        provides: propa_pvds.clone(),
-                        requires: propa_reqs.clone(),
-                        }
+                    .send(Message::Propagate {
+                        propa_change: PropaChange {
+                            from_name: self.name.clone(),
+                            new_val: pending_w.value.clone(),
+                            provides: propa_pvds.clone(),
+                            requires: propa_reqs.clone(),
+                        },
                     })
                     .await
                     .unwrap();
@@ -382,4 +382,41 @@ async fn try_reading_after_granted_write_lock() {
     // request write lock for txn 1, receive lock granted message
     // then send read lock request for a younger txn 2
     // should get lock abort message!
+}
+
+#[tokio::test]
+async fn test_handle_message() {
+    // Setup the test environment
+    let (_sndr_to_worker, rcvr_from_manager) = mpsc::channel(1024);
+    let (sndr_to_manager, mut rcvr_from_worker) = mpsc::channel(1024);
+    let mut worker = VarWorker::new("test_var", rcvr_from_manager, sndr_to_manager);
+
+    // Create a test transaction
+    let test_txn = Txn {
+        id: TxnId::new(),
+        writes: vec![],
+    };
+
+    // Test VarLockRequest handling
+    let test_msg = Message::VarLockRequest {
+        lock_kind: LockKind::Read,
+        txn: test_txn.clone(),
+    };
+
+    // Call handle_message and tick
+    worker.handle_message(test_msg).await;
+    worker.tick().await;
+
+    // Use tokio::time::timeout to avoid infinite waiting
+    let timeout_duration = std::time::Duration::from_secs(5);
+    match tokio::time::timeout(timeout_duration, rcvr_from_worker.recv()).await {
+        Ok(Some(response)) => match response {
+            Message::VarLockGranted { txn } => {
+                assert_eq!(txn.id, test_txn.id);
+            }
+            _ => panic!("Unexpected message type received"),
+        },
+        Ok(None) => panic!("Channel closed unexpectedly"),
+        Err(_) => panic!("Test timed out waiting for response"),
+    }
 }
