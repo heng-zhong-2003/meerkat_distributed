@@ -50,6 +50,6 @@ impl Hash for Txn {
 
 impl fmt::Debug for Txn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Txn").finish()
+        f.debug_struct(&format!("Txn {:?}", self.id.time)).finish()
     }
 }

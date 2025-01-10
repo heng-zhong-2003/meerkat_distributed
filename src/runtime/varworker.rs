@@ -93,6 +93,7 @@ impl VarWorker {
                         .lock_queue
                         .iter()
                         .any(|x| x.txn.id < txn.id && x.lock_kind == LockKind::Write);
+                println!("{color_yellow}this_lock_held: {this_lock_held}, older_lock_queued: {older_lock_queued}, one_is_write: {one_is_write}{color_reset}");
                 if this_lock_held && older_lock_queued && one_is_write {
                     let abort_msg = Message::VarLockAbort { txn: txn };
                     self.sender_to_manager.send(abort_msg).await.unwrap();
@@ -339,10 +340,63 @@ async fn batch_writes_to_a_and_b_mutually_independent() {
     todo!()
 }
 
+// This should not happen?
 #[tokio::test]
 async fn try_reading_after_granted_write_lock() {
     // create var worker a
     // request write lock for txn 1, receive lock granted message
     // then send read lock request for a younger txn 2
     // should get lock abort message!
+    // a channel send from manager to worker
+    // let (sndr_to_worker, rcvr_from_manager) = mpsc::channel(1024);
+    // // a channel send from worker to manager
+    // let (sndr_to_manager, mut rcvr_from_worker) = mpsc::channel(1024);
+    // let worker = VarWorker::new("a", rcvr_from_manager, sndr_to_manager.clone());
+    // tokio::spawn(worker.run_varworker());
+    // let write_txn = Txn {
+    //     id: TxnId::new(),
+    //     writes: vec![WriteToName {
+    //         name: "a".to_string(),
+    //         expr: Expr::IntConst { val: 5 },
+    //     }],
+    // };
+    // let w_lock_msg = Message::VarLockRequest {
+    //     lock_kind: LockKind::Write,
+    //     txn: write_txn.clone(),
+    // };
+    // let _ = sndr_to_worker.send(w_lock_msg).await.unwrap();
+    // if let Some(msg) = rcvr_from_worker.recv().await {
+    //     match msg {
+    //         Message::VarLockGranted { txn, from_name: _ } => {
+    //             println!(
+    //                 "{color_green}var write lock granted for txn {:?}{color_reset}",
+    //                 txn.id
+    //             );
+    //         }
+    //         _ => panic!(),
+    //     }
+    // }
+    // let write_txn_2 = Txn {
+    //     id: TxnId::new(),
+    //     writes: vec![WriteToName {
+    //         name: "a".to_string(),
+    //         expr: Expr::IntConst { val: 114 },
+    //     }],
+    // };
+    // let w_lock_msg_2 = Message::VarLockRequest {
+    //     lock_kind: LockKind::Write,
+    //     txn: write_txn_2.clone(),
+    // };
+    // let _ = sndr_to_worker.send(w_lock_msg_2).await.unwrap();
+    // if let Some(msg) = rcvr_from_worker.recv().await {
+    //     match msg {
+    //         Message::VarLockAbort { txn } => {
+    //             assert_eq!(txn.id, write_txn_2.id);
+    //         }
+    //         _ => {
+    //             println!("{color_red}{:?}{color_reset}", msg);
+    //             panic!();
+    //         }
+    //     }
+    // }
 }
