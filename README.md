@@ -1,5 +1,5 @@
 # meerkat_distributed
-Truly distributed meerkat interpreter
+Truly distributed meerkat interpreter.
 
 Possibilities: https://docs.google.com/document/d/182irBVCUuOa2P_xdoZrRFmhh4necxawbaSv5MKFuA0g/edit?usp=sharing
 
